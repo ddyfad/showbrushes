@@ -1927,7 +1927,7 @@ stock bool IsValidClient(int client, bool nobots = true)
 }
 
 #define BSP_IDENT        0x50534256
-#define MODEL_VERSION    "2"
+#define MODEL_VERSION    "3"
 #define CDTEXTURE        "showbrushes/"
 #define LUMP_PLANES      1
 #define LUMP_TEXDATA     2
@@ -2041,12 +2041,12 @@ void BuildMapModels()
 	if (triggerBodies.Length > 0)
 	{
 		char materials[1][16];
-		strcopy(materials[0], sizeof materials[], "trigger" ... MODEL_VERSION);
+		strcopy(materials[0], sizeof materials[], "trigger2");
 		if (WriteStudioModel(map, "", triggerBodies, materials, 1, g_sModelPath, sizeof g_sModelPath, checksum))
 		{
 			bundle = RollChecksum(bundle, checksum);
 			PrecacheModel(g_sModelPath, false);
-			AddPushFile("materials/showbrushes/trigger" ... MODEL_VERSION ... ".vmt");
+			AddPushFile("materials/showbrushes/trigger2.vmt");
 			AddPushModel(g_sModelPath);
 			PrintToServer("%d faceless trigger models in %s", g_FacelessModels.Length, g_sModelPath);
 		}
@@ -3291,13 +3291,14 @@ bool WriteStudioModel(const char[] map, const char[] suffix, ArrayList bodies, c
 		WriteZeros(f, 40);
 	}
 
+	int meshId = 0;
 	for (int i = 0; i < n; i++)
 	{
 		bodies.GetArray(i, body);
 		WriteInt(f, body[2]); WriteInt(f, OFF_MODELS + 148 * i - (OFF_MESHES + 116 * i));
 		WriteInt(f, numVerts[i]); WriteInt(f, 0);
 		WriteInt(f, 0); WriteInt(f, 0); WriteInt(f, 0); WriteInt(f, 0);
-		WriteInt(f, i);
+		WriteInt(f, numVerts[i] > 0 ? meshId++ : 0);
 		WriteFloat(f, 0.0); WriteFloat(f, 0.0); WriteFloat(f, 0.0);
 		WriteInt(f, 0);
 		for (int k = 0; k < 8; k++) WriteInt(f, numVerts[i]);
