@@ -7,11 +7,11 @@
 #include <entitylump>
 #include <dhooks>
 
-#define PLUGIN_NAME "super showtriggers"
+#define PLUGIN_NAME "showbrushes"
 #define PLUGIN_AUTHOR "gangy & tommy"
-#define PLUGIN_DESCRIPTION "Toggle brush visibility with selection mode"
+#define PLUGIN_DESCRIPTION "Show triggers and clip brushes with selection mode"
 #define PLUGIN_VERSION "1"
-#define PLUGIN_URL "https://github.com/dowoge/supershowtriggers"
+#define PLUGIN_URL "https://github.com/dowoge/showbrushes"
 
 #define EF_NODRAW 32
 
@@ -169,10 +169,10 @@ public void OnPluginStart()
 		SetFailState("Could not find CBaseEntity:m_fEffects");
 	}
 
-	GameData gamedata = new GameData("supershowtriggers.games");
+	GameData gamedata = new GameData("showbrushes.games");
 	if (gamedata == null)
 	{
-		SetFailState("Missing gamedata/supershowtriggers.games.txt");
+		SetFailState("Missing gamedata/showbrushes.games.txt");
 	}
 
 	StartPrepSDKCall(SDKCall_Engine);
@@ -224,20 +224,20 @@ public void OnPluginStart()
 		SetFailState("Could not prepare the netchannel calls");
 	}
 
-	BuildPath(Path_SM, g_sDeliveredPath, sizeof g_sDeliveredPath, "data/supershowtriggers_delivered.txt");
+	BuildPath(Path_SM, g_sDeliveredPath, sizeof g_sDeliveredPath, "data/showbrushes_delivered.txt");
 	g_Delivered = new KeyValues("Delivered");
 	g_Delivered.ImportFromFile(g_sDeliveredPath);
 
-	CreateConVar("sm_showtriggers_version", PLUGIN_VERSION, PLUGIN_DESCRIPTION, FCVAR_SPONLY|FCVAR_NOTIFY|FCVAR_DONTRECORD).SetString(PLUGIN_VERSION);
+	CreateConVar("sm_showbrushes_version", PLUGIN_VERSION, PLUGIN_DESCRIPTION, FCVAR_SPONLY|FCVAR_NOTIFY|FCVAR_DONTRECORD).SetString(PLUGIN_VERSION);
 
-	RegConsoleCmd("sm_showtriggerssettings", cmdShowTriggersSettings, "Toggle trigger settings menu");
-	RegConsoleCmd("sm_stsettings", cmdShowTriggersSettings, "Toggle trigger settings menu");
-	RegConsoleCmd("sm_sts", cmdShowTriggersSettings, "Toggle trigger settings menu");
+	RegConsoleCmd("sm_showbrushessettings", cmdShowTriggersSettings, "Toggle brush settings menu");
+	RegConsoleCmd("sm_sbsettings", cmdShowTriggersSettings, "Toggle brush settings menu");
+	RegConsoleCmd("sm_sbs", cmdShowTriggersSettings, "Toggle brush settings menu");
 	RegConsoleCmd("sm_showtriggers", cmdShowTriggers, "Toggles brush visibility");
 	RegConsoleCmd("sm_st", cmdShowTriggers, "Toggles brush visibility");
 	RegConsoleCmd("sm_showclips", cmdShowClips, "Toggles clip visibility");
 	RegConsoleCmd("sm_sc", cmdShowClips, "Toggles clip visibility");
-	RegConsoleCmd("sm_sthelp", cmdShowTriggersHelp, "Show help for trigger selection");
+	RegConsoleCmd("sm_sbhelp", cmdShowTriggersHelp, "Show help for brush selection");
 
 	// Selection commands
 	RegConsoleCmd("sm_select", cmdToggleSelectMode, "Toggle aim selection mode");
@@ -745,10 +745,10 @@ public Action cmdShowTriggersHelp(int client, int args)
 	if (!IsValidClient(client))
 		return Plugin_Handled;
 
-	PrintToChat(client, "%sShow Triggers - Help", WHITE);
+	PrintToChat(client, "%sShow Brushes - Help", WHITE);
 	PrintToChat(client, "%s!st - Toggle visibility of triggers", WHITE);
 	PrintToChat(client, "%s!sc - Toggle visibility of player clips", WHITE);
-	PrintToChat(client, "%s!sts - Open settings menu to choose trigger and clip types", WHITE);
+	PrintToChat(client, "%s!sbs - Open settings menu to choose trigger and clip types", WHITE);
 	PrintToChat(client, "%s!select - Toggle aim selection mode", WHITE);
 	PrintToChat(client, "%s!pick - Select the trigger or clip you're looking at", WHITE);
 	PrintToChat(client, "%s!clear - Clear current selection", WHITE);
@@ -905,7 +905,7 @@ public Action cmdShowTriggers(int client, int args)
 		CheckBrushes(ShouldRender());
 		PrintToChat(client, "%sShowtriggers toggled: %sON", WHITE, GREEN);
 
-		PrintToChat(client, "%sConsider using %s!stsettings%s or %s!select%s for more options.",
+		PrintToChat(client, "%sConsider using %s!sbsettings%s or %s!select%s for more options.",
 			WHITE, GREEN, WHITE, GREEN, WHITE);
 	}
 	else
@@ -933,7 +933,7 @@ public Action cmdShowClips(int client, int args)
 		g_bClipEnabled[client][CLIP_PLAYER] = true;
 		CheckBrushes(ShouldRender());
 		PrintToChat(client, "%sShowclips toggled: %sON", WHITE, GREEN);
-		PrintToChat(client, "%sConsider using %s!stsettings%s or %s!select%s for more options.",
+		PrintToChat(client, "%sConsider using %s!sbsettings%s or %s!select%s for more options.",
 			WHITE, GREEN, WHITE, GREEN, WHITE);
 	}
 	else
@@ -1081,7 +1081,7 @@ public Action cmdResetSelection(int client, int args)
 	CheckBrushes(ShouldRender());
 	DeleteSelection(client);
 
-	PrintToChat(client, "%sSelection reset. Use %s!st%s or %s!sts%s to show triggers normally.",
+	PrintToChat(client, "%sSelection reset. Use %s!st%s or %s!sbs%s to show triggers normally.",
 		WHITE, GREEN, WHITE, GREEN, WHITE);
 
 	return Plugin_Handled;
@@ -1741,6 +1741,7 @@ stock bool IsValidClient(int client, bool nobots = true)
 
 #define BSP_IDENT        0x50534256
 #define MODEL_VERSION    "2"
+#define CDTEXTURE        "showbrushes/"
 #define LUMP_PLANES      1
 #define LUMP_TEXDATA     2
 #define LUMP_NODES       5
@@ -1857,7 +1858,7 @@ void BuildMapModels()
 		{
 			bundle = RollChecksum(bundle, checksum);
 			PrecacheModel(g_sModelPath, false);
-			AddPushFile("materials/supershowtriggers/trigger" ... MODEL_VERSION ... ".vmt");
+			AddPushFile("materials/showbrushes/trigger" ... MODEL_VERSION ... ".vmt");
 			AddPushModel(g_sModelPath);
 			PrintToServer("%d faceless trigger models in %s", g_FacelessModels.Length, g_sModelPath);
 		}
@@ -2390,7 +2391,7 @@ int WriteClipModels(const char[] map, int bundle)
 	{
 		if (present[type])
 		{
-			Format(path, sizeof path, "materials/supershowtriggers/%s.vmt", g_CLIP_MATERIALS[type]);
+			Format(path, sizeof path, "materials/showbrushes/%s.vmt", g_CLIP_MATERIALS[type]);
 			AddPushFile(path);
 		}
 	}
@@ -2732,8 +2733,8 @@ bool WriteStudioModel(const char[] map, const char[] suffix, ArrayList bodies, c
 	}
 
 	char base[PLATFORM_MAX_PATH], path[PLATFORM_MAX_PATH], mdlName[64];
-	Format(base, sizeof base, "models/supershowtriggers/%s_%08x%s", map, checksum, suffix);
-	Format(mdlName, sizeof mdlName, "supershowtriggers/%s_%08x%s.mdl", map, checksum, suffix);
+	Format(base, sizeof base, "models/showbrushes/%s_%08x%s", map, checksum, suffix);
+	Format(mdlName, sizeof mdlName, "showbrushes/%s_%08x%s.mdl", map, checksum, suffix);
 	Format(outPath, outLen, "%s.mdl", base);
 	Format(path, sizeof path, "%s.dx90.vtx", base);
 	if (FileExists(path, true, "GAME"))
@@ -2741,7 +2742,7 @@ bool WriteStudioModel(const char[] map, const char[] suffix, ArrayList bodies, c
 		return true;
 	}
 	CreateDirectory("models", FPERM_U_READ|FPERM_U_WRITE|FPERM_U_EXEC|FPERM_G_READ|FPERM_G_EXEC|FPERM_O_READ|FPERM_O_EXEC, true, "DEFAULT_WRITE_PATH");
-	CreateDirectory("models/supershowtriggers", FPERM_U_READ|FPERM_U_WRITE|FPERM_U_EXEC|FPERM_G_READ|FPERM_G_EXEC|FPERM_O_READ|FPERM_O_EXEC, true, "DEFAULT_WRITE_PATH");
+	CreateDirectory("models/showbrushes", FPERM_U_READ|FPERM_U_WRITE|FPERM_U_EXEC|FPERM_G_READ|FPERM_G_EXEC|FPERM_O_READ|FPERM_O_EXEC, true, "DEFAULT_WRITE_PATH");
 
 	int OFF_HDR2 = 408;
 	int OFF_BONE = OFF_HDR2 + 256;
@@ -2775,7 +2776,7 @@ bool WriteStudioModel(const char[] map, const char[] suffix, ArrayList bodies, c
 		strMaterial[i] = STR_CDTEXTURE;
 		STR_CDTEXTURE += strlen(materials[i]) + 1;
 	}
-	int MDL_LENGTH = (STR_CDTEXTURE + 19 + 3) & ~3;
+	int MDL_LENGTH = (STR_CDTEXTURE + sizeof CDTEXTURE + 3) & ~3;
 
 	Format(path, sizeof path, "%s.mdl", base);
 	File f = OpenFile(path, "wb", true, "DEFAULT_WRITE_PATH");
@@ -2934,8 +2935,8 @@ bool WriteStudioModel(const char[] map, const char[] suffix, ArrayList bodies, c
 	{
 		WriteFileString(f, materials[i], true);
 	}
-	WriteFileString(f, "supershowtriggers/", true);
-	WriteZeros(f, MDL_LENGTH - (STR_CDTEXTURE + 19));
+	WriteFileString(f, CDTEXTURE, true);
+	WriteZeros(f, MDL_LENGTH - (STR_CDTEXTURE + sizeof CDTEXTURE));
 	delete f;
 
 	Format(path, sizeof path, "%s.vvd", base);
@@ -3416,10 +3417,11 @@ public void OnDatabaseConnected(Database db, const char[] error, any data)
 		return;
 	}
 	g_DB = db;
-	g_DB.Query(OnQueryDone, "CREATE TABLE IF NOT EXISTS st_selections ("
+	g_DB.Query(OnColumnAdded, "ALTER TABLE st_selections RENAME TO sb_selections");
+	g_DB.Query(OnQueryDone, "CREATE TABLE IF NOT EXISTS sb_selections ("
 		... "steamid VARCHAR(32) NOT NULL, map VARCHAR(128) NOT NULL, name VARCHAR(64) NOT NULL, "
 		... "hammerids TEXT NOT NULL, clips TEXT NOT NULL DEFAULT '', updated INTEGER NOT NULL, PRIMARY KEY (steamid, map))");
-	g_DB.Query(OnColumnAdded, "ALTER TABLE st_selections ADD COLUMN clips TEXT NOT NULL DEFAULT ''");
+	g_DB.Query(OnColumnAdded, "ALTER TABLE sb_selections ADD COLUMN clips TEXT NOT NULL DEFAULT ''");
 }
 
 public void OnColumnAdded(Database db, DBResultSet results, const char[] error, any data)
@@ -3469,7 +3471,7 @@ void SaveSelection(int client)
 	GetCurrentMap(map, sizeof map);
 	int length = strlen(ids) + strlen(clips) + 512;
 	char[] query = new char[length];
-	g_DB.Format(query, length, "REPLACE INTO st_selections (steamid, map, name, hammerids, clips, updated) VALUES ('%s', '%s', '%s', '%s', '%s', %d)",
+	g_DB.Format(query, length, "REPLACE INTO sb_selections (steamid, map, name, hammerids, clips, updated) VALUES ('%s', '%s', '%s', '%s', '%s', %d)",
 		steamId, map, name, ids, clips, GetTime());
 	g_DB.Query(OnQueryDone, query);
 }
@@ -3482,7 +3484,7 @@ void DeleteSelection(int client)
 		return;
 	}
 	GetCurrentMap(map, sizeof map);
-	g_DB.Format(query, sizeof query, "DELETE FROM st_selections WHERE steamid = '%s' AND map = '%s'", steamId, map);
+	g_DB.Format(query, sizeof query, "DELETE FROM sb_selections WHERE steamid = '%s' AND map = '%s'", steamId, map);
 	g_DB.Query(OnQueryDone, query);
 }
 
@@ -3502,7 +3504,7 @@ void LoadSelection(int client, const char[] ownerId, bool announce)
 		return;
 	}
 	GetCurrentMap(map, sizeof map);
-	g_DB.Format(query, sizeof query, "SELECT name, hammerids, clips FROM st_selections WHERE steamid = '%s' AND map = '%s'", steamId, map);
+	g_DB.Format(query, sizeof query, "SELECT name, hammerids, clips FROM sb_selections WHERE steamid = '%s' AND map = '%s'", steamId, map);
 
 	DataPack pack = new DataPack();
 	pack.WriteCell(GetClientUserId(client));
@@ -3647,7 +3649,7 @@ void ShowProfileList(int client)
 		return;
 	}
 	GetCurrentMap(map, sizeof map);
-	g_DB.Format(query, sizeof query, "SELECT steamid, name, hammerids, clips FROM st_selections WHERE map = '%s' AND steamid <> '%s' ORDER BY updated DESC",
+	g_DB.Format(query, sizeof query, "SELECT steamid, name, hammerids, clips FROM sb_selections WHERE map = '%s' AND steamid <> '%s' ORDER BY updated DESC",
 		map, steamId);
 	g_DB.Query(OnProfileListLoaded, query, GetClientUserId(client));
 }
