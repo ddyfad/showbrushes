@@ -43,7 +43,8 @@ public Plugin myinfo =
 #define CLIP_BOTH                  2
 #define CLIP_INVISIBLE             3
 #define CLIP_NODRAW                4
-#define MAX_CLIP_TYPES             5
+#define CLIP_LADDER                5
+#define MAX_CLIP_TYPES             6
 
 static const char g_NAMES[][] =
 {
@@ -59,7 +60,8 @@ static const char g_CLIP_NAMES[][] =
 	"NPC clip",
 	"Clip (player + NPC)",
 	"Invisible",
-	"Nodraw"
+	"Nodraw",
+	"Ladder"
 };
 
 static const char g_CLIP_MATERIALS[][] =
@@ -68,7 +70,8 @@ static const char g_CLIP_MATERIALS[][] =
 	"npcclip",
 	"clip",
 	"invisible",
-	"nodraw"
+	"nodraw",
+	"ladder"
 };
 
 enum struct Clip
@@ -99,7 +102,8 @@ static const int g_CLIP_COLORS[][3] =
 	{255, 240, 0},
 	{175, 60, 235},
 	{255, 140, 0},
-	{0, 230, 255}
+	{0, 230, 255},
+	{60, 255, 120}
 };
 
 // Which brush types does the player have enabled?
@@ -1951,7 +1955,7 @@ stock bool IsValidClient(int client, bool nobots = true)
 }
 
 #define BSP_IDENT        0x50534256
-#define MODEL_VERSION    "3"
+#define MODEL_VERSION    "4"
 #define CDTEXTURE        "showbrushes/"
 #define LUMP_PLANES      1
 #define LUMP_TEXDATA     2
@@ -2638,6 +2642,10 @@ int ClassifyBrush(int b, int[] texKind, bool hiddenEntity = false)
 	if (brush[1] < 4 || brush[1] > MAX_BRUSH_SIDES)
 	{
 		return -1;
+	}
+	if ((contents & CONTENTS_LADDER) != 0)
+	{
+		return CLIP_LADDER;
 	}
 	if ((contents & (CONTENTS_SOLID|CONTENTS_PLAYERCLIP|CONTENTS_MONSTERCLIP|CONTENTS_GRATE)) == 0
 		|| (contents & (CONTENTS_WATER|CONTENTS_SLIME|CONTENTS_AREAPORTAL|CONTENTS_ORIGIN)) != 0)
