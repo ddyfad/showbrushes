@@ -454,25 +454,14 @@ int FindTriggerAtCrosshair(int client)
 		return -1;
 
 	float eyePos[3], eyeAngles[3], endPos[3];
-
-	// Get the player's eye position and angles
 	GetClientEyePosition(client, eyePos);
 	GetClientEyeAngles(client, eyeAngles);
 
-	// Calculate the direction vector
-	float direction[3];
-	GetAngleVectors(eyeAngles, direction, NULL_VECTOR, NULL_VECTOR);
-	NormalizeVector(direction, direction);
+	TR_TraceRay(eyePos, eyeAngles, MASK_SOLID_BRUSHONLY, RayType_Infinite);
+	TR_GetEndPosition(endPos);
 
-	// Calculate the end position of the ray
-	for (int i = 0; i < 3; i++)
-	{
-		endPos[i] = eyePos[i] + direction[i] * 1000.0;
-	}
-
-	// Find the closest trigger
-	int closestTrigger = -1;
-	float closestDist = 99999.0;
+	int closestTrigger = -1, insideTrigger = -1;
+	float closestFraction = 1.0;
 
 	int count = g_AllTriggersOnMap.Length;
 	for (int i = 0; i < count; i++)
@@ -481,108 +470,25 @@ int FindTriggerAtCrosshair(int client)
 		if (!IsValidEntity(entity))
 			continue;
 
-		// Get the trigger bounds
-		float triggerOrigin[3], triggerMins[3], triggerMaxs[3];
-		GetEntPropVector(entity, Prop_Send, "m_vecOrigin", triggerOrigin);
-		GetEntPropVector(entity, Prop_Data, "m_vecMins", triggerMins);
-		GetEntPropVector(entity, Prop_Data, "m_vecMaxs", triggerMaxs);
+		TR_ClipRayToEntity(eyePos, endPos, MASK_ALL, RayType_EndPoint, entity);
+		if (!TR_DidHit())
+			continue;
 
-		// Check if the ray intersects the trigger's bounding box
-		float intersection[3];
-		if (RayIntersectsBox(eyePos, endPos, triggerOrigin, triggerMins, triggerMaxs, intersection))
+		if (TR_StartSolid())
 		{
-			// Distance to the intersection point
-			float dist = GetVectorDistance(eyePos, intersection);
+			insideTrigger = entity;
+			continue;
+		}
 
-			// Keep the closest one
-			if (dist < closestDist)
-			{
-				closestTrigger = entity;
-				closestDist = dist;
-			}
+		float fraction = TR_GetFraction();
+		if (fraction < closestFraction)
+		{
+			closestTrigger = entity;
+			closestFraction = fraction;
 		}
 	}
 
-	return closestTrigger;
-}
-
-/**
- * Check if a ray intersects an axis-aligned bounding box (slab method)
- *
- * @param rayStart        Start of the ray
- * @param rayEnd          End of the ray
- * @param boxOrigin       Origin of the box
- * @param boxMins         Mins of the box (relative to the origin)
- * @param boxMaxs         Maxs of the box (relative to the origin)
- * @param intersection    Output: the intersection point
- * @return                True if the ray intersects the box
- */
-bool RayIntersectsBox(const float rayStart[3], const float rayEnd[3],
-	const float boxOrigin[3], const float boxMins[3], const float boxMaxs[3],
-	float intersection[3])
-{
-	// Convert the box to world coordinates
-	float worldMins[3], worldMaxs[3];
-	for (int i = 0; i < 3; i++)
-	{
-		worldMins[i] = boxOrigin[i] + boxMins[i];
-		worldMaxs[i] = boxOrigin[i] + boxMaxs[i];
-	}
-
-	// Ray direction and length
-	float rayDir[3], rayLength;
-	SubtractVectors(rayEnd, rayStart, rayDir);
-	rayLength = NormalizeVector(rayDir, rayDir);
-
-	// Slab method
-	float tMin = 0.0;
-	float tMax = rayLength;
-
-	// Check each axis
-	for (int i = 0; i < 3; i++)
-	{
-		if (FloatAbs(rayDir[i]) < 0.00001)
-		{
-			// Ray is parallel to the slab, check if the origin is inside it
-			if (rayStart[i] < worldMins[i] || rayStart[i] > worldMaxs[i])
-				return false;
-		}
-		else
-		{
-			// Intersection distances with the near and far planes of the slab
-			float invD = 1.0 / rayDir[i];
-			float t1 = (worldMins[i] - rayStart[i]) * invD;
-			float t2 = (worldMaxs[i] - rayStart[i]) * invD;
-
-			// Swap if needed
-			if (t1 > t2)
-			{
-				float temp = t1;
-				t1 = t2;
-				t2 = temp;
-			}
-
-			// Narrow the interval
-			if (t1 > tMin) tMin = t1;
-			if (t2 < tMax) tMax = t2;
-
-			// Early exit
-			if (tMin > tMax)
-				return false;
-		}
-	}
-
-	// Check that the intersection is within the ray length
-	if (tMin > rayLength)
-		return false;
-
-	// Calculate the intersection point
-	for (int i = 0; i < 3; i++)
-	{
-		intersection[i] = rayStart[i] + rayDir[i] * tMin;
-	}
-
-	return true;
+	return closestTrigger != -1 ? closestTrigger : insideTrigger;
 }
 
 public Action cmdShowTriggersHelp(int client, int args)
