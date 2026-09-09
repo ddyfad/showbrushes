@@ -30,7 +30,6 @@ public Plugin myinfo =
 	url = PLUGIN_URL
 }
 
-#define SELECTION_MENU            -3
 #define ENABLE_ALL                -2
 #define DISABLE_ALL               -1
 #define TRIGGER_MULTIPLE           0
@@ -38,6 +37,13 @@ public Plugin myinfo =
 #define TRIGGER_TELEPORT           2
 #define TRIGGER_TELEPORT_RELATIVE  3
 #define MAX_TYPES                  4
+
+#define CLIP_PLAYER                0
+#define CLIP_NPC                   1
+#define CLIP_BOTH                  2
+#define CLIP_INVISIBLE             3
+#define CLIP_NODRAW                4
+#define MAX_CLIP_TYPES             5
 
 static const char g_NAMES[][] =
 {
@@ -47,13 +53,49 @@ static const char g_NAMES[][] =
 	"trigger_teleport_relative"
 };
 
+static const char g_CLIP_NAMES[][] =
+{
+	"Player clip",
+	"NPC clip",
+	"Clip (player + NPC)",
+	"Invisible",
+	"Nodraw"
+};
+
+static const char g_CLIP_MATERIALS[][] =
+{
+	"playerclip",
+	"npcclip",
+	"clip",
+	"invisible",
+	"nodraw"
+};
+
+enum struct Clip
+{
+	int type;
+	int brush;
+	int planeStart;
+	int planeCount;
+	int firstPoly;
+	int numPolys;
+	int file;
+	int body;
+	int prop;
+	float mins[3];
+	float maxs[3];
+}
+
 // Which brush types does the player have enabled?
 bool g_bTypeEnabled[MAXPLAYERS+1][MAX_TYPES];
+bool g_bClipEnabled[MAXPLAYERS+1][MAX_CLIP_TYPES];
 // Offset for brush effects
 int g_iOffsetMFEffects = -1;
 
 // Main menu
 Menu g_Menu;
+Menu g_TriggerMenu;
+Menu g_ClipMenu;
 Menu g_SelectionMenu;
 Menu g_ProfileMenu;
 
@@ -66,7 +108,9 @@ bool g_bRestorePending[MAXPLAYERS+1];
 bool g_bSelectMode[MAXPLAYERS+1];
 bool g_bUseSelectionMode[MAXPLAYERS+1];
 ArrayList g_SelectedTriggers[MAXPLAYERS+1];
+ArrayList g_SelectedClips[MAXPLAYERS+1];
 int g_iHighlightedTrigger[MAXPLAYERS+1] = {-1, ...};
+int g_iHighlightedClip[MAXPLAYERS+1] = {-1, ...};
 
 // Cache of all triggers on the map
 ArrayList g_AllTriggersOnMap;
@@ -82,22 +126,30 @@ int g_iMultipleKind[2048+1];
 
 int g_iProxyTrigger[2048+1] = {-1, ...};
 int g_iProxyType[2048+1];
+int g_iClipPropType[2048+1] = {-1, ...};
+int g_iClipPropClip[2048+1] = {-1, ...};
 bool g_bHooked;
 ArrayList g_FacelessModels;
 char g_sModelPath[PLATFORM_MAX_PATH];
+
+ArrayList g_Clips;
+ArrayList g_ClipPlanes;
+ArrayList g_ClipFiles;
+StringMap g_ClipByBrush;
 
 Handle g_hGetPlayerNetInfo;
 Handle g_hSendFile;
 Handle g_hGetStreamProgress;
 Handle g_hGetMsgHandler;
 Handle g_hRequestFile;
+Handle g_hSetFileTransmissionMode;
 DynamicHook g_hFileReceived;
 DynamicHook g_hFileDenied;
 KeyValues g_Delivered;
 char g_sDeliveredPath[PLATFORM_MAX_PATH];
 char g_sModelBase[64];
-char g_sPushFiles[4][PLATFORM_MAX_PATH];
-int g_iPushSize[4];
+ArrayList g_PushFiles;
+ArrayList g_PushSizes;
 int g_iPushTotal;
 int g_iFileStreamCount;
 int g_iFileStreamReceive;
@@ -157,12 +209,17 @@ public void OnPluginStart()
 	PrepSDKCall_SetReturnInfo(SDKType_PlainOldData, SDKPass_Plain);
 	g_hRequestFile = EndPrepSDKCall();
 
+	StartPrepSDKCall(SDKCall_Raw);
+	PrepSDKCall_SetFromConf(gamedata, SDKConf_Virtual, "SetFileTransmissionMode");
+	PrepSDKCall_AddParameter(SDKType_Bool, SDKPass_Plain);
+	g_hSetFileTransmissionMode = EndPrepSDKCall();
+
 	g_hFileReceived = DynamicHook.FromConf(gamedata, "FileReceived");
 	g_hFileDenied = DynamicHook.FromConf(gamedata, "FileDenied");
 	delete gamedata;
 
 	if (g_hGetPlayerNetInfo == null || g_hSendFile == null || g_hGetStreamProgress == null || g_iFileStreamCount == -1 || g_iFileStreamReceive == -1
-		|| g_hGetMsgHandler == null || g_hRequestFile == null || g_hFileReceived == null || g_hFileDenied == null)
+		|| g_hGetMsgHandler == null || g_hRequestFile == null || g_hSetFileTransmissionMode == null || g_hFileReceived == null || g_hFileDenied == null)
 	{
 		SetFailState("Could not prepare the netchannel calls");
 	}
@@ -178,31 +235,32 @@ public void OnPluginStart()
 	RegConsoleCmd("sm_sts", cmdShowTriggersSettings, "Toggle trigger settings menu");
 	RegConsoleCmd("sm_showtriggers", cmdShowTriggers, "Toggles brush visibility");
 	RegConsoleCmd("sm_st", cmdShowTriggers, "Toggles brush visibility");
+	RegConsoleCmd("sm_showclips", cmdShowClips, "Toggles clip visibility");
+	RegConsoleCmd("sm_sc", cmdShowClips, "Toggles clip visibility");
 	RegConsoleCmd("sm_sthelp", cmdShowTriggersHelp, "Show help for trigger selection");
 
 	// Selection commands
 	RegConsoleCmd("sm_select", cmdToggleSelectMode, "Toggle aim selection mode");
-	RegConsoleCmd("sm_pick", cmdPickTrigger, "Pick the trigger you're looking at");
+	RegConsoleCmd("sm_pick", cmdPick, "Pick the trigger or clip you're looking at");
 	RegConsoleCmd("sm_confirm", cmdConfirmSelection, "Confirm trigger selection");
 	RegConsoleCmd("sm_reset", cmdResetSelection, "Reset trigger selection");
 	RegConsoleCmd("sm_clear", cmdClearSelection, "Clear current selection");
 
-	Menu menu = new Menu(menuHandler_Main, MenuAction_DrawItem|MenuAction_DisplayItem);
+	Menu menu = new Menu(menuHandler_Main);
 	menu.SetTitle("Toggle Visibility");
-	menu.AddItem("-2", "Enable All Triggers");
-	menu.AddItem("-1", "Disable All Triggers\n\n");
-	for (int i = 0; i < MAX_TYPES; i++)
-	{
-		menu.AddItem(IntToStringEx(i), g_NAMES[i]);
-	}
-	menu.AddItem("-3", "Selection");
+	menu.AddItem("triggers", "Triggers");
+	menu.AddItem("clips", "Clips");
+	menu.AddItem("selection", "Selection");
 	g_Menu = menu;
 
+	g_TriggerMenu = BuildTypeMenu("Triggers", g_NAMES, MAX_TYPES);
+	g_ClipMenu = BuildTypeMenu("Clips", g_CLIP_NAMES, MAX_CLIP_TYPES);
+
 	Menu selection = new Menu(menuHandler_Selection, MenuAction_DrawItem|MenuAction_DisplayItem);
-	selection.SetTitle("Trigger Selection");
+	selection.SetTitle("Selection");
 	selection.ExitBackButton = true;
 	selection.AddItem("select", "Selection mode");
-	selection.AddItem("pick", "Pick aimed trigger");
+	selection.AddItem("pick", "Pick aimed brush");
 	selection.AddItem("confirm", "Confirm selection");
 	selection.AddItem("clear", "Clear selection");
 	selection.AddItem("reset", "Reset selection");
@@ -217,6 +275,12 @@ public void OnPluginStart()
 	g_ProfileMenu = profile;
 
 	g_TriggerByHammerId = new StringMap();
+	g_ClipByBrush = new StringMap();
+	g_Clips = new ArrayList(sizeof Clip);
+	g_ClipPlanes = new ArrayList(4);
+	g_ClipFiles = new ArrayList(ByteCountToCells(PLATFORM_MAX_PATH));
+	g_PushFiles = new ArrayList(ByteCountToCells(PLATFORM_MAX_PATH));
+	g_PushSizes = new ArrayList();
 	Database.Connect(OnDatabaseConnected, "storage-local");
 
 	// Trigger cache
@@ -225,7 +289,9 @@ public void OnPluginStart()
 	for (int i = 1; i <= MaxClients; i++)
 	{
 		g_SelectedTriggers[i] = new ArrayList();
+		g_SelectedClips[i] = new ArrayList();
 		g_iHighlightedTrigger[i] = -1;
+		g_iHighlightedClip[i] = -1;
 	}
 
 	// Cache triggers (late load)
@@ -235,14 +301,53 @@ public void OnPluginStart()
 	CreateTimer(0.1, Timer_UpdateAimTargets, _, TIMER_REPEAT);
 }
 
+Menu BuildTypeMenu(const char[] title, const char[][] names, int count)
+{
+	Menu menu = new Menu(menuHandler_Types, MenuAction_DrawItem|MenuAction_DisplayItem);
+	menu.SetTitle(title);
+	menu.ExitBackButton = true;
+	menu.AddItem("-2", "Enable All");
+	menu.AddItem("-1", "Disable All\n\n");
+	for (int i = 0; i < count; i++)
+	{
+		menu.AddItem(IntToStringEx(i), names[i]);
+	}
+	return menu;
+}
+
+public void OnConfigsExecuted()
+{
+	int tick = RoundToNearest(1.0 / GetTickInterval());
+	if (tick > 100)
+	{
+		tick = 100;
+	}
+	RaiseConVar("sv_minrate", 128000, false);
+	RaiseConVar("sv_minupdaterate", tick, false);
+	RaiseConVar("sv_maxupdaterate", tick, true);
+}
+
+void RaiseConVar(const char[] name, int value, bool zeroIsUnlimited)
+{
+	ConVar cvar = FindConVar(name);
+	if (cvar == null || cvar.IntValue >= value || (zeroIsUnlimited && cvar.IntValue <= 0))
+	{
+		return;
+	}
+	LogMessage("Raising %s from %d to %d for model transfers", name, cvar.IntValue, value);
+	cvar.IntValue = value;
+}
+
 public void OnMapStart()
 {
 	g_bTriggersCached = false;
 	for (int i = 0; i < sizeof g_iProxyTrigger; i++)
 	{
 		g_iProxyTrigger[i] = -1;
+		g_iClipPropType[i] = -1;
+		g_iClipPropClip[i] = -1;
 	}
-	BuildFacelessTriggerModel();
+	BuildMapModels();
 
 	// Cache all triggers when the map starts
 	CreateTimer(1.0, Timer_CacheAllTriggers, _, TIMER_FLAG_NO_MAPCHANGE);
@@ -296,6 +401,7 @@ public Action Timer_CacheAllTriggers(Handle timer)
 
 	delete kinds;
 	PrintToServer("Cached %d triggers on the map", count);
+	SpawnClipTypeProps();
 
 	g_bTriggersCached = true;
 	for (int client = 1; client <= MaxClients; client++)
@@ -384,18 +490,57 @@ public void OnClientConnected(int client)
 	g_bUseSelectionMode[client] = false;
 	g_bSelectMode[client] = false;
 	g_iHighlightedTrigger[client] = -1;
+	g_iHighlightedClip[client] = -1;
 
 	if (g_SelectedTriggers[client] != null)
 	{
 		delete g_SelectedTriggers[client];
 	}
 	g_SelectedTriggers[client] = new ArrayList();
+	if (g_SelectedClips[client] != null)
+	{
+		delete g_SelectedClips[client];
+	}
+	g_SelectedClips[client] = new ArrayList();
 
 	// Reset trigger types
+	SetAllTypes(client, false);
+}
+
+void SetAllTypes(int client, bool enabled)
+{
 	for (int i = 0; i < MAX_TYPES; i++)
 	{
-		g_bTypeEnabled[client][i] = false;
+		g_bTypeEnabled[client][i] = enabled;
 	}
+	for (int i = 0; i < MAX_CLIP_TYPES; i++)
+	{
+		g_bClipEnabled[client][i] = enabled;
+	}
+}
+
+bool AnyTypeEnabled(int client)
+{
+	for (int i = 0; i < MAX_TYPES; i++)
+	{
+		if (g_bTypeEnabled[client][i])
+		{
+			return true;
+		}
+	}
+	for (int i = 0; i < MAX_CLIP_TYPES; i++)
+	{
+		if (g_bClipEnabled[client][i])
+		{
+			return true;
+		}
+	}
+	return false;
+}
+
+int SelectionCount(int client)
+{
+	return g_SelectedTriggers[client].Length + g_SelectedClips[client].Length;
 }
 
 public Action Timer_UpdateAimTargets(Handle timer)
@@ -418,7 +563,8 @@ public Action Timer_UpdateAimTargets(Handle timer)
 		}
 
 		// Find what the player is aiming at
-		int aimTarget = FindTriggerAtCrosshair(client);
+		int aimTarget, aimClip;
+		FindAimTarget(client, aimTarget, aimClip);
 
 		// Reset the previous highlight if it changed and it's not selected
 		if (g_iHighlightedTrigger[client] != -1
@@ -440,6 +586,16 @@ public Action Timer_UpdateAimTargets(Handle timer)
 			SetEntityRenderMode(aimTarget, RENDER_TRANSCOLOR);
 			SetEntityRenderColor(aimTarget, 0, 255, 255, 200);
 		}
+
+		if (g_iHighlightedClip[client] != aimClip)
+		{
+			g_iHighlightedClip[client] = aimClip;
+			if (aimClip != -1)
+			{
+				EnsureClipProp(aimClip);
+			}
+			PruneClipProps();
+		}
 	}
 
 	return Plugin_Continue;
@@ -448,10 +604,12 @@ public Action Timer_UpdateAimTargets(Handle timer)
 /**
  * Find the trigger entity the client is looking at (or -1)
  */
-int FindTriggerAtCrosshair(int client)
+void FindAimTarget(int client, int &trigger, int &clip)
 {
+	trigger = -1;
+	clip = -1;
 	if (!IsValidClient(client))
-		return -1;
+		return;
 
 	float eyePos[3], eyeAngles[3], endPos[3];
 	GetClientEyePosition(client, eyePos);
@@ -488,7 +646,98 @@ int FindTriggerAtCrosshair(int client)
 		}
 	}
 
-	return closestTrigger != -1 ? closestTrigger : insideTrigger;
+	float dir[3];
+	SubtractVectors(endPos, eyePos, dir);
+	float length = GetVectorLength(dir);
+	if (length > 0.0)
+	{
+		ScaleVector(dir, (length + 1.0) / length);
+	}
+
+	int closestClip = -1, insideClip = -1;
+	float closestClipDistance = 0.0;
+	count = g_Clips.Length;
+	for (int i = 0; i < count; i++)
+	{
+		float t;
+		bool inside;
+		if (!RayHitsClip(i, eyePos, dir, t, inside))
+			continue;
+
+		if (inside)
+		{
+			insideClip = i;
+			continue;
+		}
+
+		float distance = t * (length + 1.0);
+		if (closestClip == -1 || distance < closestClipDistance)
+		{
+			closestClip = i;
+			closestClipDistance = distance;
+		}
+	}
+
+	if (closestTrigger != -1 && (closestClip == -1 || closestFraction * length <= closestClipDistance))
+	{
+		trigger = closestTrigger;
+	}
+	else if (closestClip != -1)
+	{
+		clip = closestClip;
+	}
+	else if (insideTrigger != -1)
+	{
+		trigger = insideTrigger;
+	}
+	else
+	{
+		clip = insideClip;
+	}
+}
+
+bool RayHitsClip(int index, const float start[3], const float dir[3], float &tEnter, bool &inside)
+{
+	Clip c;
+	g_Clips.GetArray(index, c);
+
+	float plane[4];
+	float tExit = 1.0;
+	tEnter = 0.0;
+	inside = true;
+
+	for (int i = 0; i < c.planeCount; i++)
+	{
+		g_ClipPlanes.GetArray(c.planeStart + i, plane);
+		float d0 = start[0] * plane[0] + start[1] * plane[1] + start[2] * plane[2] - plane[3];
+		float denom = dir[0] * plane[0] + dir[1] * plane[1] + dir[2] * plane[2];
+
+		if (d0 > 0.0)
+		{
+			inside = false;
+		}
+		if (FloatAbs(denom) < 0.000001)
+		{
+			if (d0 > 0.0)
+				return false;
+			continue;
+		}
+
+		float t = -d0 / denom;
+		if (denom < 0.0)
+		{
+			if (t > tEnter)
+				tEnter = t;
+		}
+		else if (t < tExit)
+		{
+			tExit = t;
+		}
+		if (tEnter > tExit)
+			return false;
+	}
+
+	return true;
 }
 
 public Action cmdShowTriggersHelp(int client, int args)
@@ -498,9 +747,10 @@ public Action cmdShowTriggersHelp(int client, int args)
 
 	PrintToChat(client, "%sShow Triggers - Help", WHITE);
 	PrintToChat(client, "%s!st - Toggle visibility of triggers", WHITE);
-	PrintToChat(client, "%s!sts - Open settings menu to choose trigger types", WHITE);
+	PrintToChat(client, "%s!sc - Toggle visibility of player clips", WHITE);
+	PrintToChat(client, "%s!sts - Open settings menu to choose trigger and clip types", WHITE);
 	PrintToChat(client, "%s!select - Toggle aim selection mode", WHITE);
-	PrintToChat(client, "%s!pick - Select the trigger you're looking at", WHITE);
+	PrintToChat(client, "%s!pick - Select the trigger or clip you're looking at", WHITE);
 	PrintToChat(client, "%s!clear - Clear current selection", WHITE);
 	PrintToChat(client, "%s!confirm - Confirm your selection", WHITE);
 	PrintToChat(client, "%s!reset - Reset your selection", WHITE);
@@ -519,15 +769,15 @@ public Action cmdClearSelection(int client, int args)
 		return Plugin_Handled;
 	}
 
-	int count = g_SelectedTriggers[client].Length;
+	int count = SelectionCount(client);
 	if (count == 0)
 	{
-		PrintToChat(client, "%sYou haven't selected any triggers yet.", WHITE);
+		PrintToChat(client, "%sYou haven't selected any brushes yet.", WHITE);
 		return Plugin_Handled;
 	}
 
 	// Reset the colors of all selected triggers
-	for (int i = 0; i < count; i++)
+	for (int i = 0; i < g_SelectedTriggers[client].Length; i++)
 	{
 		int entity = g_SelectedTriggers[client].Get(i);
 		if (IsValidEntity(entity))
@@ -537,13 +787,15 @@ public Action cmdClearSelection(int client, int args)
 	}
 
 	g_SelectedTriggers[client].Clear();
+	g_SelectedClips[client].Clear();
+	PruneClipProps();
 
-	PrintToChat(client, "%sSelection cleared. %s%d%s triggers removed.", WHITE, GOLD, count, WHITE);
+	PrintToChat(client, "%sSelection cleared. %s%d%s brushes removed.", WHITE, GOLD, count, WHITE);
 
 	return Plugin_Handled;
 }
 
-public Action cmdPickTrigger(int client, int args)
+public Action cmdPick(int client, int args)
 {
 	if (!IsValidClient(client))
 		return Plugin_Handled;
@@ -555,11 +807,18 @@ public Action cmdPickTrigger(int client, int args)
 	}
 
 	// Find the trigger the player is looking at
-	int aimTarget = FindTriggerAtCrosshair(client);
+	int aimTarget, aimClip;
+	FindAimTarget(client, aimTarget, aimClip);
+
+	if (aimClip != -1)
+	{
+		PickClip(client, aimClip);
+		return Plugin_Handled;
+	}
 
 	if (aimTarget == -1 || !IsValidEntity(aimTarget))
 	{
-		PrintToChat(client, "%sNo trigger found. Aim directly at a trigger.", WHITE);
+		PrintToChat(client, "%sNo trigger or clip found. Aim directly at one.", WHITE);
 		return Plugin_Handled;
 	}
 
@@ -582,7 +841,7 @@ public Action cmdPickTrigger(int client, int args)
 		PrintToChat(client, "%s%sAdded%s %s%s%s to selection (%s%d%s total)",
 			WHITE, GREEN, WHITE,
 			GOLD, className, WHITE,
-			GOLD, g_SelectedTriggers[client].Length, WHITE);
+			GOLD, SelectionCount(client), WHITE);
 	}
 	else
 	{
@@ -596,10 +855,36 @@ public Action cmdPickTrigger(int client, int args)
 		PrintToChat(client, "%s%sRemoved%s %s%s%s from selection (%s%d%s total)",
 			WHITE, RED, WHITE,
 			GOLD, className, WHITE,
-			GOLD, g_SelectedTriggers[client].Length, WHITE);
+			GOLD, SelectionCount(client), WHITE);
 	}
 
 	return Plugin_Handled;
+}
+
+void PickClip(int client, int clip)
+{
+	Clip c;
+	g_Clips.GetArray(clip, c);
+
+	int index = g_SelectedClips[client].FindValue(clip);
+	if (index == -1)
+	{
+		g_SelectedClips[client].Push(clip);
+		EnsureClipProp(clip);
+		PrintToChat(client, "%s%sAdded%s %s%s%s to selection (%s%d%s total)",
+			WHITE, GREEN, WHITE,
+			GOLD, g_CLIP_NAMES[c.type], WHITE,
+			GOLD, SelectionCount(client), WHITE);
+	}
+	else
+	{
+		g_SelectedClips[client].Erase(index);
+		PruneClipProps();
+		PrintToChat(client, "%s%sRemoved%s %s%s%s from selection (%s%d%s total)",
+			WHITE, RED, WHITE,
+			GOLD, g_CLIP_NAMES[c.type], WHITE,
+			GOLD, SelectionCount(client), WHITE);
+	}
 }
 
 public Action cmdShowTriggers(int client, int args)
@@ -608,62 +893,82 @@ public Action cmdShowTriggers(int client, int args)
 		return Plugin_Handled;
 
 	// Selection mode with a confirmed selection: toggle the selected triggers
-	if (g_bUseSelectionMode[client] && g_SelectedTriggers[client].Length > 0)
+	if (ToggleSelectionDisplay(client))
 	{
-		bool anyEnabled = false;
-		for (int i = 0; i < MAX_TYPES; i++)
-		{
-			if (g_bTypeEnabled[client][i])
-			{
-				anyEnabled = true;
-				break;
-			}
-		}
-
-		if (!anyEnabled)
-		{
-			// Enable all types so the selected triggers are shown
-			for (int i = 0; i < MAX_TYPES; i++)
-			{
-				g_bTypeEnabled[client][i] = true;
-			}
-			CheckBrushes(ShouldRender());
-			PrintToChat(client, "%sShowing %s%d selected%s triggers: %sON",
-				WHITE, GOLD, g_SelectedTriggers[client].Length, WHITE, GREEN);
-		}
-		else
-		{
-			// Disable all types
-			for (int i = 0; i < MAX_TYPES; i++)
-			{
-				g_bTypeEnabled[client][i] = false;
-			}
-			CheckBrushes(ShouldRender());
-			PrintToChat(client, "%sShowing selected triggers: %sOFF", WHITE, RED);
-		}
+		return Plugin_Handled;
 	}
+
 	// Normal mode: toggle trigger_teleport
+	if (!g_bTypeEnabled[client][TRIGGER_TELEPORT])
+	{
+		g_bTypeEnabled[client][TRIGGER_TELEPORT] = true;
+		CheckBrushes(ShouldRender());
+		PrintToChat(client, "%sShowtriggers toggled: %sON", WHITE, GREEN);
+
+		PrintToChat(client, "%sConsider using %s!stsettings%s or %s!select%s for more options.",
+			WHITE, GREEN, WHITE, GREEN, WHITE);
+	}
 	else
 	{
-		// Toggle trigger_teleport visibility
-		if (!g_bTypeEnabled[client][TRIGGER_TELEPORT])
-		{
-			g_bTypeEnabled[client][TRIGGER_TELEPORT] = true;
-			CheckBrushes(ShouldRender());
-			PrintToChat(client, "%sShowtriggers toggled: %sON", WHITE, GREEN);
-
-			PrintToChat(client, "%sConsider using %s!stsettings%s or %s!select%s for more options.",
-				WHITE, GREEN, WHITE, GREEN, WHITE);
-		}
-		else
-		{
-			g_bTypeEnabled[client][TRIGGER_TELEPORT] = false;
-			CheckBrushes(ShouldRender());
-			PrintToChat(client, "%sShowtriggers toggled: %sOFF", WHITE, RED);
-		}
+		g_bTypeEnabled[client][TRIGGER_TELEPORT] = false;
+		CheckBrushes(ShouldRender());
+		PrintToChat(client, "%sShowtriggers toggled: %sOFF", WHITE, RED);
 	}
 
 	return Plugin_Handled;
+}
+
+public Action cmdShowClips(int client, int args)
+{
+	if (!IsValidClient(client))
+		return Plugin_Handled;
+
+	if (ToggleSelectionDisplay(client))
+	{
+		return Plugin_Handled;
+	}
+
+	if (!g_bClipEnabled[client][CLIP_PLAYER])
+	{
+		g_bClipEnabled[client][CLIP_PLAYER] = true;
+		CheckBrushes(ShouldRender());
+		PrintToChat(client, "%sShowclips toggled: %sON", WHITE, GREEN);
+		PrintToChat(client, "%sConsider using %s!stsettings%s or %s!select%s for more options.",
+			WHITE, GREEN, WHITE, GREEN, WHITE);
+	}
+	else
+	{
+		g_bClipEnabled[client][CLIP_PLAYER] = false;
+		CheckBrushes(ShouldRender());
+		PrintToChat(client, "%sShowclips toggled: %sOFF", WHITE, RED);
+	}
+
+	return Plugin_Handled;
+}
+
+bool ToggleSelectionDisplay(int client)
+{
+	if (!g_bUseSelectionMode[client] || SelectionCount(client) == 0)
+	{
+		return false;
+	}
+
+	if (!AnyTypeEnabled(client))
+	{
+		// Enable all types so the selected triggers are shown
+		SetAllTypes(client, true);
+		CheckBrushes(ShouldRender());
+		PrintToChat(client, "%sShowing %s%d selected%s brushes: %sON",
+			WHITE, GOLD, SelectionCount(client), WHITE, GREEN);
+	}
+	else
+	{
+		// Disable all types
+		SetAllTypes(client, false);
+		CheckBrushes(ShouldRender());
+		PrintToChat(client, "%sShowing selected brushes: %sOFF", WHITE, RED);
+	}
+	return true;
 }
 
 public Action cmdToggleSelectMode(int client, int args)
@@ -676,26 +981,23 @@ public Action cmdToggleSelectMode(int client, int args)
 	if (g_bSelectMode[client])
 	{
 		// Enable all trigger types so the player can see every trigger
-		for (int i = 0; i < MAX_TYPES; i++)
-		{
-			g_bTypeEnabled[client][i] = true;
-		}
+		SetAllTypes(client, true);
 
 		CheckBrushes(ShouldRender());
 
 		// Show instructions
-		PrintToChat(client, "%sUse %s!pick%s to select a trigger, %s!confirm%s when you're done.",
+		PrintToChat(client, "%sUse %s!pick%s to select a trigger or clip, %s!confirm%s when you're done.",
 			WHITE, GREEN, WHITE, GREEN, WHITE);
 	}
 	else
 	{
+		g_iHighlightedClip[client] = -1;
+		PruneClipProps();
+
 		// Without a confirmed selection, hide everything again
 		if (!g_bUseSelectionMode[client])
 		{
-			for (int i = 0; i < MAX_TYPES; i++)
-			{
-				g_bTypeEnabled[client][i] = false;
-			}
+			SetAllTypes(client, false);
 
 			// Reset the colors of all triggers
 			int count = g_AllTriggersOnMap.Length;
@@ -722,21 +1024,20 @@ public Action cmdConfirmSelection(int client, int args)
 	if (!IsValidClient(client))
 		return Plugin_Handled;
 
-	if (g_SelectedTriggers[client].Length == 0)
+	if (SelectionCount(client) == 0)
 	{
-		PrintToChat(client, "%sYou haven't selected any triggers. Use %s!select%s first.",
+		PrintToChat(client, "%sYou haven't selected any brushes. Use %s!select%s first.",
 			WHITE, GREEN, WHITE);
 		return Plugin_Handled;
 	}
 
 	g_bUseSelectionMode[client] = true;
 	g_bSelectMode[client] = false;
+	g_iHighlightedClip[client] = -1;
+	PruneClipProps();
 
 	// Enable all trigger types for the selected triggers
-	for (int i = 0; i < MAX_TYPES; i++)
-	{
-		g_bTypeEnabled[client][i] = true;
-	}
+	SetAllTypes(client, true);
 
 	// Reset the colors of the selected triggers so they show their normal colors
 	int count = g_SelectedTriggers[client].Length;
@@ -752,8 +1053,8 @@ public Action cmdConfirmSelection(int client, int args)
 	CheckBrushes(ShouldRender());
 	SaveSelection(client);
 
-	PrintToChat(client, "%sSelection confirmed! %s%d triggers%s selected.",
-		WHITE, GOLD, g_SelectedTriggers[client].Length, WHITE);
+	PrintToChat(client, "%sSelection confirmed! %s%d brushes%s selected.",
+		WHITE, GOLD, SelectionCount(client), WHITE);
 	PrintToChat(client, "%sUse %s!st%s to toggle them on/off.", WHITE, GREEN, WHITE);
 
 	PrintToChat(client, "%sUse %s!reset%s to reset your selection.", WHITE, GREEN, WHITE);
@@ -768,14 +1069,14 @@ public Action cmdResetSelection(int client, int args)
 
 	// Clear the selection and reset the state
 	g_SelectedTriggers[client].Clear();
+	g_SelectedClips[client].Clear();
 	g_bUseSelectionMode[client] = false;
 	g_bSelectMode[client] = false;
+	g_iHighlightedClip[client] = -1;
+	PruneClipProps();
 
 	// Disable all trigger types
-	for (int i = 0; i < MAX_TYPES; i++)
-	{
-		g_bTypeEnabled[client][i] = false;
-	}
+	SetAllTypes(client, false);
 
 	CheckBrushes(ShouldRender());
 	DeleteSelection(client);
@@ -802,6 +1103,40 @@ public Action cmdShowTriggersSettings(int client, int args)
 
 public int menuHandler_Main(Menu menu, MenuAction action, int param1, int param2)
 {
+	if (action == MenuAction_Select)
+	{
+		char info[16];
+		menu.GetItem(param2, info, sizeof info);
+		if (StrEqual(info, "triggers"))
+			g_TriggerMenu.Display(param1, MENU_TIME_FOREVER);
+		else if (StrEqual(info, "clips"))
+			g_ClipMenu.Display(param1, MENU_TIME_FOREVER);
+		else
+			g_SelectionMenu.Display(param1, MENU_TIME_FOREVER);
+	}
+	return 0;
+}
+
+int TypeCount(Menu menu)
+{
+	return menu == g_ClipMenu ? MAX_CLIP_TYPES : MAX_TYPES;
+}
+
+bool IsTypeEnabled(Menu menu, int client, int type)
+{
+	return menu == g_ClipMenu ? g_bClipEnabled[client][type] : g_bTypeEnabled[client][type];
+}
+
+void SetTypeEnabled(Menu menu, int client, int type, bool enabled)
+{
+	if (menu == g_ClipMenu)
+		g_bClipEnabled[client][type] = enabled;
+	else
+		g_bTypeEnabled[client][type] = enabled;
+}
+
+public int menuHandler_Types(Menu menu, MenuAction action, int param1, int param2)
+{
 	switch (action)
 	{
 		case MenuAction_Select:
@@ -815,28 +1150,23 @@ public int menuHandler_Main(Menu menu, MenuAction action, int param1, int param2
 				case ENABLE_ALL:
 				{
 					// Loop through all types and enable
-					for (int i = 0; i < MAX_TYPES; i++)
+					for (int i = 0; i < TypeCount(menu); i++)
 					{
-						g_bTypeEnabled[param1][i] = true;
+						SetTypeEnabled(menu, param1, i, true);
 					}
 				}
 				case DISABLE_ALL:
 				{
 					// Loop through all types and disable
-					for (int i = 0; i < MAX_TYPES; i++)
+					for (int i = 0; i < TypeCount(menu); i++)
 					{
-						g_bTypeEnabled[param1][i] = false;
+						SetTypeEnabled(menu, param1, i, false);
 					}
-				}
-				case SELECTION_MENU:
-				{
-					g_SelectionMenu.Display(param1, MENU_TIME_FOREVER);
-					return 0;
 				}
 				default:
 				{
 					// Toggle selected type
-					g_bTypeEnabled[param1][type] = !g_bTypeEnabled[param1][type];
+					SetTypeEnabled(menu, param1, type, !IsTypeEnabled(menu, param1, type));
 				}
 			}
 
@@ -853,9 +1183,9 @@ public int menuHandler_Main(Menu menu, MenuAction action, int param1, int param2
 			{
 				case ENABLE_ALL:
 				{
-					for (int i = 0; i < MAX_TYPES; i++)
+					for (int i = 0; i < TypeCount(menu); i++)
 					{
-						if (!g_bTypeEnabled[param1][i])
+						if (!IsTypeEnabled(menu, param1, i))
 						{
 							return ITEMDRAW_DEFAULT;
 						}
@@ -865,9 +1195,9 @@ public int menuHandler_Main(Menu menu, MenuAction action, int param1, int param2
 				}
 				case DISABLE_ALL:
 				{
-					for (int i = 0; i < MAX_TYPES; i++)
+					for (int i = 0; i < TypeCount(menu); i++)
 					{
-						if (g_bTypeEnabled[param1][i])
+						if (IsTypeEnabled(menu, param1, i))
 						{
 							return ITEMDRAW_DEFAULT;
 						}
@@ -889,7 +1219,7 @@ public int menuHandler_Main(Menu menu, MenuAction action, int param1, int param2
 			int type = StringToInt(info);
 			if (type >= 0)
 			{
-				if (g_bTypeEnabled[param1][type])
+				if (IsTypeEnabled(menu, param1, type))
 				{
 					StrCat(text, sizeof text, ": [ON]");
 					return RedrawMenuItem(text);
@@ -898,6 +1228,13 @@ public int menuHandler_Main(Menu menu, MenuAction action, int param1, int param2
 				{
 					StrCat(text, sizeof text, ": [OFF]");
 				}
+			}
+		}
+		case MenuAction_Cancel:
+		{
+			if (param2 == MenuCancel_ExitBack)
+			{
+				g_Menu.Display(param1, MENU_TIME_FOREVER);
 			}
 		}
 	}
@@ -917,7 +1254,7 @@ public int menuHandler_Selection(Menu menu, MenuAction action, int param1, int p
 			if (StrEqual(info, "select"))
 				cmdToggleSelectMode(param1, 0);
 			else if (StrEqual(info, "pick"))
-				cmdPickTrigger(param1, 0);
+				cmdPick(param1, 0);
 			else if (StrEqual(info, "confirm"))
 				cmdConfirmSelection(param1, 0);
 			else if (StrEqual(info, "clear"))
@@ -937,7 +1274,7 @@ public int menuHandler_Selection(Menu menu, MenuAction action, int param1, int p
 			char info[8];
 			menu.GetItem(param2, info, sizeof info);
 
-			int count = g_SelectedTriggers[param1].Length;
+			int count = SelectionCount(param1);
 			if (StrEqual(info, "pick") && !g_bSelectMode[param1])
 			{
 				return ITEMDRAW_DISABLED;
@@ -965,7 +1302,7 @@ public int menuHandler_Selection(Menu menu, MenuAction action, int param1, int p
 				return RedrawMenuItem(text);
 			}
 
-			int count = g_SelectedTriggers[param1].Length;
+			int count = SelectionCount(param1);
 			if (StrEqual(info, "confirm") && count > 0)
 			{
 				Format(text, sizeof text, "Confirm selection (%d)", count);
@@ -998,19 +1335,22 @@ public void OnClientDisconnect(int client)
 			g_iHandlerHooks[client][i] = 0;
 		}
 	}
-	for (int i = 0; i < MAX_TYPES; i++)
-	{
-		g_bTypeEnabled[client][i] = false;
-	}
+	SetAllTypes(client, false);
 
 	g_bUseSelectionMode[client] = false;
 	g_bSelectMode[client] = false;
 	g_iHighlightedTrigger[client] = -1;
+	g_iHighlightedClip[client] = -1;
 
 	if (g_SelectedTriggers[client] != null)
 	{
 		g_SelectedTriggers[client].Clear();
 	}
+	if (g_SelectedClips[client] != null)
+	{
+		g_SelectedClips[client].Clear();
+	}
+	PruneClipProps();
 
 	CheckBrushes(ShouldRender());
 }
@@ -1021,7 +1361,7 @@ public void OnPluginEnd()
 
 	for (int ent = MaxClients + 1; ent <= 2048; ent++)
 	{
-		if (g_iProxyTrigger[ent] != -1 && IsValidEntity(ent))
+		if ((g_iProxyTrigger[ent] != -1 || g_iClipPropType[ent] != -1 || g_iClipPropClip[ent] != -1) && IsValidEntity(ent))
 		{
 			RemoveEntity(ent);
 		}
@@ -1033,6 +1373,10 @@ public void OnPluginEnd()
 		if (g_SelectedTriggers[i] != null)
 		{
 			delete g_SelectedTriggers[i];
+		}
+		if (g_SelectedClips[i] != null)
+		{
+			delete g_SelectedClips[i];
 		}
 	}
 
@@ -1062,6 +1406,17 @@ void CheckBrushes(bool transmit)
 			continue;
 		}
 
+		if (g_iClipPropType[ent] != -1)
+		{
+			SetBrushVisible(ent, hookST_ClipType, transmit);
+			continue;
+		}
+		if (g_iClipPropClip[ent] != -1)
+		{
+			SetBrushVisible(ent, hookST_Clip, transmit);
+			continue;
+		}
+
 		int type = -1;
 		if (g_iProxyTrigger[ent] != -1)
 		{
@@ -1086,22 +1441,24 @@ void CheckBrushes(bool transmit)
 
 		if (type != -1)
 		{
-			SetBrushVisible(ent, type, transmit);
+			SetBrushVisible(ent, HookForType(type), transmit);
 		}
 	}
 }
 
-void SetBrushVisible(int ent, int type, bool visible)
+SDKHookCB HookForType(int type)
 {
-	SDKHookCB f = INVALID_FUNCTION;
 	switch (type)
 	{
-		case TRIGGER_MULTIPLE:          f = hookST_triggerMultiple;
-		case TRIGGER_PUSH:              f = hookST_triggerPush;
-		case TRIGGER_TELEPORT:          f = hookST_triggerTeleport;
-		case TRIGGER_TELEPORT_RELATIVE: f = hookST_triggerTeleportRelative;
+		case TRIGGER_MULTIPLE:          return hookST_triggerMultiple;
+		case TRIGGER_PUSH:              return hookST_triggerPush;
+		case TRIGGER_TELEPORT:          return hookST_triggerTeleport;
 	}
+	return hookST_triggerTeleportRelative;
+}
 
+void SetBrushVisible(int ent, SDKHookCB f, bool visible)
+{
 	if (visible)
 	{
 		SetEntData(ent, g_iOffsetMFEffects, GetEntData(ent, g_iOffsetMFEffects) & ~EF_NODRAW);
@@ -1134,15 +1491,9 @@ bool ShouldRender()
 {
 	for (int client = 1; client <= MaxClients; client++)
 	{
-		if (IsClientInGame(client))
+		if (IsClientInGame(client) && AnyTypeEnabled(client))
 		{
-			for (int i = 0; i < MAX_TYPES; i++)
-			{
-				if (g_bTypeEnabled[client][i])
-				{
-					return true;
-				}
-			}
+			return true;
 		}
 	}
 
@@ -1333,6 +1684,52 @@ public Action hookST_triggerTeleportRelative(int entity, int client)
 	return Plugin_Continue;
 }
 
+public Action hookST_ClipType(int entity, int client)
+{
+	if (!g_bClipEnabled[client][g_iClipPropType[entity]])
+		return Plugin_Handled;
+	if (!g_bClientHasModel[client])
+	{
+		EnsureClientModel(client);
+		return Plugin_Handled;
+	}
+	if (g_bUseSelectionMode[client])
+		return Plugin_Handled;
+	return Plugin_Continue;
+}
+
+public Action hookST_Clip(int entity, int client)
+{
+	int clip = g_iClipPropClip[entity];
+	Clip c;
+	g_Clips.GetArray(clip, c);
+	if (!g_bClipEnabled[client][c.type])
+		return Plugin_Handled;
+	if (!g_bClientHasModel[client])
+	{
+		EnsureClientModel(client);
+		return Plugin_Handled;
+	}
+
+	bool selected = g_SelectedClips[client].FindValue(clip) != -1;
+	if (g_bSelectMode[client] && selected)
+	{
+		SetEntityRenderColor(entity, 255, 255, 0, 200);
+		return Plugin_Continue;
+	}
+	if (g_bSelectMode[client] && g_iHighlightedClip[client] == clip)
+	{
+		SetEntityRenderColor(entity, 0, 255, 255, 200);
+		return Plugin_Continue;
+	}
+	if (g_bUseSelectionMode[client] && selected)
+	{
+		SetEntityRenderColor(entity, 255, 255, 255, 255);
+		return Plugin_Continue;
+	}
+	return Plugin_Handled;
+}
+
 stock bool IsValidClient(int client, bool nobots = true)
 {
     if (client <= 0 || client > MaxClients || !IsClientConnected(client) || (nobots && IsFakeClient(client)))
@@ -1345,31 +1742,45 @@ stock bool IsValidClient(int client, bool nobots = true)
 #define BSP_IDENT        0x50534256
 #define MODEL_VERSION    "2"
 #define LUMP_PLANES      1
+#define LUMP_TEXDATA     2
 #define LUMP_NODES       5
+#define LUMP_TEXINFO     6
 #define LUMP_LEAFS       10
 #define LUMP_MODELS      14
 #define LUMP_LEAFBRUSHES 17
 #define LUMP_BRUSHES     18
 #define LUMP_BRUSHSIDES  19
+#define LUMP_TEXSTRDATA  43
+#define LUMP_TEXSTRTBL   44
 
 #define MAX_POLY_POINTS 128
 #define MAX_BRUSH_SIDES 256
 #define BOGUS_RANGE     32768.0
 #define CLIP_EPSILON    0.01
+#define MAX_MODEL_VERTS 65535
 
 ArrayList g_PolyVerts;
 ArrayList g_Polys;
-ArrayList g_ModelPolys;
+ArrayList g_BodyPolys;
+ArrayList g_Lumps[64];
 
 float g_PolyA[MAX_POLY_POINTS][3];
 float g_PolyB[MAX_POLY_POINTS][3];
 int g_LumpScratch[1024];
 
-void BuildFacelessTriggerModel()
+void BuildMapModels()
 {
 	delete g_FacelessModels;
 	g_FacelessModels = new ArrayList();
 	g_sModelPath[0] = '\0';
+	g_sModelBase[0] = '\0';
+	g_Clips.Clear();
+	g_ClipPlanes.Clear();
+	g_ClipFiles.Clear();
+	g_ClipByBrush.Clear();
+	g_PushFiles.Clear();
+	g_PushSizes.Clear();
+	g_iPushTotal = 0;
 
 	char map[PLATFORM_MAX_PATH], path[PLATFORM_MAX_PATH];
 	GetCurrentMap(map, sizeof map);
@@ -1397,86 +1808,111 @@ void BuildFacelessTriggerModel()
 		lumpVer[i] = entry[2];
 	}
 
-	ArrayList models = ReadLump(f, lumpOfs[LUMP_MODELS], lumpLen[LUMP_MODELS], 12, 4);
-	ArrayList planes = ReadLump(f, lumpOfs[LUMP_PLANES], lumpLen[LUMP_PLANES], 5, 4);
-	ArrayList brushes = ReadLump(f, lumpOfs[LUMP_BRUSHES], lumpLen[LUMP_BRUSHES], 3, 4);
-	ArrayList sides = ReadLump(f, lumpOfs[LUMP_BRUSHSIDES], lumpLen[LUMP_BRUSHSIDES], 4, 2);
-	ArrayList nodes = ReadLump(f, lumpOfs[LUMP_NODES], lumpLen[LUMP_NODES], 8, 4);
-	ArrayList leafs = ReadLump(f, lumpOfs[LUMP_LEAFS], lumpLen[LUMP_LEAFS], lumpVer[LUMP_LEAFS] == 0 ? 14 : 8, 4);
-	ArrayList leafBrushes = ReadLump(f, lumpOfs[LUMP_LEAFBRUSHES], lumpLen[LUMP_LEAFBRUSHES], 1, 2);
+	g_Lumps[LUMP_MODELS] = ReadLump(f, lumpOfs[LUMP_MODELS], lumpLen[LUMP_MODELS], 12, 4);
+	g_Lumps[LUMP_PLANES] = ReadLump(f, lumpOfs[LUMP_PLANES], lumpLen[LUMP_PLANES], 5, 4);
+	g_Lumps[LUMP_BRUSHES] = ReadLump(f, lumpOfs[LUMP_BRUSHES], lumpLen[LUMP_BRUSHES], 3, 4);
+	g_Lumps[LUMP_BRUSHSIDES] = ReadLump(f, lumpOfs[LUMP_BRUSHSIDES], lumpLen[LUMP_BRUSHSIDES], 4, 2);
+	g_Lumps[LUMP_NODES] = ReadLump(f, lumpOfs[LUMP_NODES], lumpLen[LUMP_NODES], 8, 4);
+	g_Lumps[LUMP_LEAFS] = ReadLump(f, lumpOfs[LUMP_LEAFS], lumpLen[LUMP_LEAFS], lumpVer[LUMP_LEAFS] == 0 ? 14 : 8, 4);
+	g_Lumps[LUMP_LEAFBRUSHES] = ReadLump(f, lumpOfs[LUMP_LEAFBRUSHES], lumpLen[LUMP_LEAFBRUSHES], 1, 2);
+	g_Lumps[LUMP_TEXINFO] = ReadLump(f, lumpOfs[LUMP_TEXINFO], lumpLen[LUMP_TEXINFO], 18, 4);
+	g_Lumps[LUMP_TEXDATA] = ReadLump(f, lumpOfs[LUMP_TEXDATA], lumpLen[LUMP_TEXDATA], 8, 4);
+	g_Lumps[LUMP_TEXSTRTBL] = ReadLump(f, lumpOfs[LUMP_TEXSTRTBL], lumpLen[LUMP_TEXSTRTBL], 1, 4);
+	g_Lumps[LUMP_TEXSTRDATA] = ReadLump(f, lumpOfs[LUMP_TEXSTRDATA], lumpLen[LUMP_TEXSTRDATA], 1, 1);
 	delete f;
 
 	g_PolyVerts = new ArrayList(3);
 	g_Polys = new ArrayList(2);
-	g_ModelPolys = new ArrayList(2);
+	g_BodyPolys = new ArrayList();
+	ArrayList triggerBodies = new ArrayList(3);
 
-	if (models != null && planes != null && brushes != null && sides != null && nodes != null && leafs != null && leafBrushes != null)
+	bool ok = true;
+	for (int i = 0; i < sizeof g_Lumps; i++)
 	{
-		char buffer[64];
-		int model[12];
-		int length = EntityLump.Length();
-		for (int i = 0; i < length; i++)
+		if (g_Lumps[i] == null && (i == LUMP_MODELS || i == LUMP_PLANES || i == LUMP_BRUSHES || i == LUMP_BRUSHSIDES
+			|| i == LUMP_NODES || i == LUMP_LEAFS || i == LUMP_LEAFBRUSHES))
 		{
-			EntityLumpEntry ent = EntityLump.Get(i);
-			ent.GetNextKey("classname", buffer, sizeof buffer);
-			bool wanted = false;
-			for (int type = 0; type < MAX_TYPES; type++)
-			{
-				wanted = wanted || StrEqual(buffer, g_NAMES[type]);
-			}
-			ent.GetNextKey("model", buffer, sizeof buffer);
-			delete ent;
-
-			if (!wanted || buffer[0] != '*')
-			{
-				continue;
-			}
-			int modelIndex = StringToInt(buffer[1]);
-			if (modelIndex <= 0 || modelIndex >= models.Length)
-			{
-				continue;
-			}
-			models.GetArray(modelIndex, model, sizeof model);
-			if (model[11] != 0)
-			{
-				continue;
-			}
-
-			int firstPoly = g_Polys.Length;
-			AddModelPolys(model[9], planes, brushes, sides, nodes, leafs, leafBrushes);
-			if (g_Polys.Length > firstPoly)
-			{
-				int range[2];
-				range[0] = firstPoly;
-				range[1] = g_Polys.Length - firstPoly;
-				g_ModelPolys.PushArray(range);
-				g_FacelessModels.Push(modelIndex);
-			}
+			ok = false;
 		}
 	}
 
-	delete models;
-	delete planes;
-	delete brushes;
-	delete sides;
-	delete nodes;
-	delete leafs;
-	delete leafBrushes;
-
-	if (g_FacelessModels.Length > 0)
+	if (ok)
 	{
-		ReplaceString(map, sizeof map, "/", "_");
-		if (WriteTriggerModel(map))
+		AddTriggerBodies(triggerBodies);
+		AddClipBrushes();
+	}
+
+	for (int i = 0; i < sizeof g_Lumps; i++)
+	{
+		delete g_Lumps[i];
+	}
+
+	ReplaceString(map, sizeof map, "/", "_");
+	int bundle = 0, checksum;
+	if (triggerBodies.Length > 0)
+	{
+		char materials[1][16];
+		strcopy(materials[0], sizeof materials[], "trigger" ... MODEL_VERSION);
+		if (WriteStudioModel(map, "", triggerBodies, materials, 1, g_sModelPath, sizeof g_sModelPath, checksum))
 		{
+			bundle = RollChecksum(bundle, checksum);
 			PrecacheModel(g_sModelPath, false);
-			SetPushFiles();
+			AddPushFile("materials/supershowtriggers/trigger" ... MODEL_VERSION ... ".vmt");
+			AddPushModel(g_sModelPath);
 			PrintToServer("%d faceless trigger models in %s", g_FacelessModels.Length, g_sModelPath);
 		}
+		else
+		{
+			g_sModelPath[0] = '\0';
+			g_FacelessModels.Clear();
+		}
+	}
+	delete triggerBodies;
+
+	if (g_Clips.Length > 0)
+	{
+		bundle = WriteClipModels(map, bundle);
+	}
+	Clip c;
+	for (int i = 0; i < g_Clips.Length; i++)
+	{
+		g_Clips.GetArray(i, c);
+		g_ClipByBrush.SetValue(IntToStringEx(c.brush), i);
+	}
+
+	if (g_PushFiles.Length > 0)
+	{
+		Format(g_sModelBase, sizeof g_sModelBase, "%s_%08x", map, bundle);
 	}
 
 	delete g_PolyVerts;
 	delete g_Polys;
-	delete g_ModelPolys;
+	delete g_BodyPolys;
+}
+
+int RollChecksum(int checksum, int value)
+{
+	return ((checksum << 1) | (checksum >>> 31)) ^ value;
+}
+
+void AddPushFile(const char[] path)
+{
+	g_PushFiles.PushString(path);
+	int size = FileSize(path, true, "GAME");
+	g_PushSizes.Push(size);
+	g_iPushTotal += size;
+}
+
+void AddPushModel(const char[] mdl)
+{
+	char path[PLATFORM_MAX_PATH];
+	AddPushFile(mdl);
+	strcopy(path, sizeof path, mdl);
+	ReplaceString(path, sizeof path, ".mdl", ".vvd");
+	AddPushFile(path);
+	strcopy(path, sizeof path, mdl);
+	ReplaceString(path, sizeof path, ".mdl", ".dx90.vtx");
+	AddPushFile(path);
 }
 
 ArrayList ReadLump(File f, int ofs, int len, int cells, int cellSize)
@@ -1503,13 +1939,77 @@ ArrayList ReadLump(File f, int ofs, int len, int cells, int cellSize)
 	return list;
 }
 
-void AddModelPolys(int headnode, ArrayList planes, ArrayList brushes, ArrayList sides, ArrayList nodes, ArrayList leafs, ArrayList leafBrushes)
+void AddTriggerBodies(ArrayList bodies)
 {
+	ArrayList models = g_Lumps[LUMP_MODELS];
+	char buffer[64];
+	int model[12], body[3];
+	int length = EntityLump.Length();
+	for (int i = 0; i < length; i++)
+	{
+		EntityLumpEntry ent = EntityLump.Get(i);
+		ent.GetNextKey("classname", buffer, sizeof buffer);
+		bool wanted = false;
+		for (int type = 0; type < MAX_TYPES; type++)
+		{
+			wanted = wanted || StrEqual(buffer, g_NAMES[type]);
+		}
+		ent.GetNextKey("model", buffer, sizeof buffer);
+		delete ent;
+
+		if (!wanted || buffer[0] != '*')
+		{
+			continue;
+		}
+		int modelIndex = StringToInt(buffer[1]);
+		if (modelIndex <= 0 || modelIndex >= models.Length)
+		{
+			continue;
+		}
+		models.GetArray(modelIndex, model, sizeof model);
+		if (model[11] != 0)
+		{
+			continue;
+		}
+
+		int firstPoly = g_Polys.Length;
+		ArrayList brushes = CollectModelBrushes(model[9]);
+		int planeNums[MAX_BRUSH_SIDES];
+		for (int b = 0; b < brushes.Length; b++)
+		{
+			int planeCount = BrushPlanes(brushes.Get(b), planeNums);
+			AddBrushFaces(planeNums, planeCount);
+		}
+		delete brushes;
+
+		if (g_Polys.Length > firstPoly)
+		{
+			body[0] = g_BodyPolys.Length;
+			body[1] = g_Polys.Length - firstPoly;
+			body[2] = 0;
+			for (int p = firstPoly; p < g_Polys.Length; p++)
+			{
+				g_BodyPolys.Push(p);
+			}
+			bodies.PushArray(body);
+			g_FacelessModels.Push(modelIndex);
+		}
+	}
+}
+
+ArrayList CollectModelBrushes(int headnode)
+{
+	ArrayList nodes = g_Lumps[LUMP_NODES];
+	ArrayList leafs = g_Lumps[LUMP_LEAFS];
+	ArrayList leafBrushes = g_Lumps[LUMP_LEAFBRUSHES];
+	int brushCount = g_Lumps[LUMP_BRUSHES].Length;
+
 	ArrayList stack = new ArrayList();
-	ArrayList done = new ArrayList();
+	ArrayList result = new ArrayList();
+	int[] seen = new int[(brushCount + 31) / 32];
 	stack.Push(headnode);
 
-	int node[8], brush[3], side[4], planeNums[MAX_BRUSH_SIDES];
+	int node[8];
 	while (stack.Length > 0)
 	{
 		int n = stack.Get(stack.Length - 1);
@@ -1539,48 +2039,367 @@ void AddModelPolys(int headnode, ArrayList planes, ArrayList brushes, ArrayList 
 		for (int i = first; i < first + num && i < leafBrushes.Length; i++)
 		{
 			int b = leafBrushes.Get(i);
-			if (b >= brushes.Length || done.FindValue(b) != -1)
+			if (b >= brushCount || (seen[b >> 5] & (1 << (b & 31))) != 0)
 			{
 				continue;
 			}
-			done.Push(b);
-			brushes.GetArray(b, brush, sizeof brush);
-
-			int planeCount = 0;
-			for (int s = brush[0]; s < brush[0] + brush[1] && s < sides.Length && planeCount < MAX_BRUSH_SIDES; s++)
-			{
-				sides.GetArray(s, side, sizeof side);
-				if (side[3] == 0 && side[0] < planes.Length)
-				{
-					planeNums[planeCount++] = side[0];
-				}
-			}
-
-			for (int p = 0; p < planeCount; p++)
-			{
-				int count = BuildFace(planes, planeNums, planeCount, p);
-				if (count < 3)
-				{
-					continue;
-				}
-				int range[2];
-				range[0] = g_PolyVerts.Length;
-				range[1] = count;
-				for (int v = 0; v < count; v++)
-				{
-					g_PolyVerts.PushArray(g_PolyA[v]);
-				}
-				g_Polys.PushArray(range);
-			}
+			seen[b >> 5] |= 1 << (b & 31);
+			result.Push(b);
 		}
 	}
 
 	delete stack;
-	delete done;
+	return result;
 }
 
-int BuildFace(ArrayList planes, const int[] planeNums, int planeCount, int faceIndex)
+int BrushPlanes(int b, int[] planeNums)
 {
+	ArrayList brushes = g_Lumps[LUMP_BRUSHES];
+	ArrayList sides = g_Lumps[LUMP_BRUSHSIDES];
+	int planeLength = g_Lumps[LUMP_PLANES].Length;
+	int brush[3], side[4];
+	brushes.GetArray(b, brush, sizeof brush);
+
+	int planeCount = 0;
+	for (int s = brush[0]; s < brush[0] + brush[1] && s < sides.Length && planeCount < MAX_BRUSH_SIDES; s++)
+	{
+		sides.GetArray(s, side, sizeof side);
+		if (side[3] == 0 && side[0] < planeLength)
+		{
+			planeNums[planeCount++] = side[0];
+		}
+	}
+	return planeCount;
+}
+
+void AddBrushFaces(const int[] planeNums, int planeCount)
+{
+	for (int p = 0; p < planeCount; p++)
+	{
+		int count = BuildFace(planeNums, planeCount, p);
+		if (count < 3)
+		{
+			continue;
+		}
+		int range[2];
+		range[0] = g_PolyVerts.Length;
+		range[1] = count;
+		for (int v = 0; v < count; v++)
+		{
+			g_PolyVerts.PushArray(g_PolyA[v]);
+		}
+		g_Polys.PushArray(range);
+	}
+}
+
+void AddClipBrushes()
+{
+	if (g_Lumps[LUMP_TEXINFO] == null || g_Lumps[LUMP_TEXDATA] == null || g_Lumps[LUMP_TEXSTRTBL] == null || g_Lumps[LUMP_TEXSTRDATA] == null)
+	{
+		return;
+	}
+
+	int model[12];
+	g_Lumps[LUMP_MODELS].GetArray(0, model, sizeof model);
+	ArrayList brushes = CollectModelBrushes(model[9]);
+	int[] texKind = new int[g_Lumps[LUMP_TEXDATA].Length];
+	for (int i = 0; i < g_Lumps[LUMP_TEXDATA].Length; i++)
+	{
+		texKind[i] = -2;
+	}
+
+	int planeNums[MAX_BRUSH_SIDES];
+	float plane[4], point[3];
+	Clip c;
+	for (int i = 0; i < brushes.Length; i++)
+	{
+		int b = brushes.Get(i);
+		int type = ClassifyBrush(b, texKind);
+		if (type == -1)
+		{
+			continue;
+		}
+		int planeCount = BrushPlanes(b, planeNums);
+		if (planeCount < 4)
+		{
+			continue;
+		}
+
+		int firstPoly = g_Polys.Length;
+		AddBrushFaces(planeNums, planeCount);
+		if (g_Polys.Length == firstPoly)
+		{
+			continue;
+		}
+
+		c.type = type;
+		c.brush = b;
+		c.planeStart = g_ClipPlanes.Length;
+		c.planeCount = planeCount;
+		c.firstPoly = firstPoly;
+		c.numPolys = g_Polys.Length - firstPoly;
+		c.file = -1;
+		c.body = -1;
+		c.prop = -1;
+		for (int k = 0; k < 3; k++)
+		{
+			c.mins[k] = 1.0e30;
+			c.maxs[k] = -1.0e30;
+		}
+		for (int p = 0; p < planeCount; p++)
+		{
+			g_Lumps[LUMP_PLANES].GetArray(planeNums[p], plane, 4);
+			g_ClipPlanes.PushArray(plane);
+		}
+		int range[2];
+		for (int p = firstPoly; p < g_Polys.Length; p++)
+		{
+			g_Polys.GetArray(p, range);
+			for (int v = range[0]; v < range[0] + range[1]; v++)
+			{
+				g_PolyVerts.GetArray(v, point);
+				for (int k = 0; k < 3; k++)
+				{
+					if (point[k] < c.mins[k]) c.mins[k] = point[k];
+					if (point[k] > c.maxs[k]) c.maxs[k] = point[k];
+				}
+			}
+		}
+
+		g_Clips.PushArray(c);
+	}
+	delete brushes;
+	PrintToServer("%d clip brushes on the map", g_Clips.Length);
+}
+
+int ClassifyBrush(int b, int[] texKind)
+{
+	ArrayList sides = g_Lumps[LUMP_BRUSHSIDES];
+	ArrayList texInfo = g_Lumps[LUMP_TEXINFO];
+	int brush[3], side[4], info[18];
+	g_Lumps[LUMP_BRUSHES].GetArray(b, brush, sizeof brush);
+	int contents = brush[2];
+
+	if (brush[1] < 4 || brush[1] > MAX_BRUSH_SIDES)
+	{
+		return -1;
+	}
+	if ((contents & (CONTENTS_SOLID|CONTENTS_PLAYERCLIP|CONTENTS_MONSTERCLIP|CONTENTS_GRATE)) == 0
+		|| (contents & (CONTENTS_WATER|CONTENTS_SLIME|CONTENTS_AREAPORTAL|CONTENTS_ORIGIN)) != 0)
+	{
+		return -1;
+	}
+
+	bool playerClip = (contents & CONTENTS_PLAYERCLIP) != 0;
+	bool npcClip = (contents & CONTENTS_MONSTERCLIP) != 0;
+	if (playerClip && npcClip)
+		return CLIP_BOTH;
+	if (playerClip)
+		return CLIP_PLAYER;
+	if (npcClip)
+		return CLIP_NPC;
+
+	int realSides = 0, invisibleSides = 0;
+	for (int s = brush[0]; s < brush[0] + brush[1]; s++)
+	{
+		if (s >= sides.Length)
+			return -1;
+		sides.GetArray(s, side, sizeof side);
+		if (side[3] != 0)
+			continue;
+		realSides++;
+
+		if (side[1] < 0 || side[1] >= texInfo.Length)
+			return -1;
+		texInfo.GetArray(side[1], info, sizeof info);
+		if ((info[16] & (SURF_SKY|SURF_SKY2D)) != 0)
+			return -1;
+
+		int kind = MaterialKind(info[17], info[16], texKind);
+		if (kind == CLIP_INVISIBLE)
+			invisibleSides++;
+		else if (kind != CLIP_NODRAW)
+			return -1;
+	}
+
+	if (realSides == 0)
+		return -1;
+	return invisibleSides > 0 ? CLIP_INVISIBLE : CLIP_NODRAW;
+}
+
+int MaterialKind(int texdata, int flags, int[] texKind)
+{
+	if (texdata < 0 || texdata >= g_Lumps[LUMP_TEXDATA].Length)
+	{
+		return -1;
+	}
+	if (texKind[texdata] != -2)
+	{
+		return texKind[texdata];
+	}
+
+	char name[64];
+	int kind = -1;
+	if (GetMaterialName(texdata, name, sizeof name))
+	{
+		if (StrEqual(name, "TOOLS/TOOLSNODRAW", false) || StrEqual(name, "TOOLS/NODRAW", false) || StrEqual(name, "NODRAW", false))
+		{
+			kind = CLIP_NODRAW;
+		}
+		else if (StrEqual(name, "TOOLS/TOOLSINVISIBLE", false) || StrEqual(name, "TOOLS/INVISIBLE", false) || StrEqual(name, "INVISIBLE", false)
+			|| StrEqual(name, "TOOLS/TOOLSINVISIBLELADDER", false) || StrEqual(name, "TOOLS/TOOLSBLOCKLIGHT", false) || StrEqual(name, "TOOLS/TOOLSBLOCKBULLETS", false))
+		{
+			kind = CLIP_INVISIBLE;
+		}
+		else if ((flags & SURF_NODRAW) != 0)
+		{
+			kind = CLIP_NODRAW;
+		}
+	}
+	texKind[texdata] = kind;
+	return kind;
+}
+
+bool GetMaterialName(int texdata, char[] name, int maxlen)
+{
+	ArrayList table = g_Lumps[LUMP_TEXSTRTBL];
+	ArrayList data = g_Lumps[LUMP_TEXSTRDATA];
+	int id = g_Lumps[LUMP_TEXDATA].Get(texdata, 3);
+	if (id < 0 || id >= table.Length)
+	{
+		return false;
+	}
+	int offset = table.Get(id);
+	int len = 0;
+	while (len < maxlen - 1 && offset + len < data.Length)
+	{
+		int ch = data.Get(offset + len) & 0xFF;
+		if (ch == 0)
+		{
+			break;
+		}
+		name[len++] = ch;
+	}
+	name[len] = '\0';
+	return len > 0;
+}
+
+int PolyVertCount(int firstPoly, int numPolys)
+{
+	int count = 0, range[2];
+	for (int p = firstPoly; p < firstPoly + numPolys; p++)
+	{
+		g_Polys.GetArray(p, range);
+		count += range[1];
+	}
+	return count;
+}
+
+int WriteClipModels(const char[] map, int bundle)
+{
+	int total = g_Clips.Length;
+	int start = 0, fileIndex = 0;
+	char path[PLATFORM_MAX_PATH], suffix[16];
+	Clip c;
+	int body[3];
+
+	while (start < total)
+	{
+		int verts = 0, end = start;
+		while (end < total)
+		{
+			g_Clips.GetArray(end, c);
+			int v = 2 * PolyVertCount(c.firstPoly, c.numPolys);
+			if (verts + v > MAX_MODEL_VERTS && end > start)
+			{
+				break;
+			}
+			verts += v;
+			end++;
+		}
+
+		g_BodyPolys.Clear();
+		ArrayList bodies = new ArrayList(3);
+		for (int type = 0; type < MAX_CLIP_TYPES; type++)
+		{
+			body[0] = g_BodyPolys.Length;
+			body[2] = type;
+			for (int i = start; i < end; i++)
+			{
+				g_Clips.GetArray(i, c);
+				if (c.type != type)
+				{
+					continue;
+				}
+				for (int p = c.firstPoly; p < c.firstPoly + c.numPolys; p++)
+				{
+					g_BodyPolys.Push(p);
+				}
+			}
+			body[1] = g_BodyPolys.Length - body[0];
+			bodies.PushArray(body);
+		}
+		for (int i = start; i < end; i++)
+		{
+			g_Clips.GetArray(i, c);
+			body[0] = g_BodyPolys.Length;
+			body[1] = c.numPolys;
+			body[2] = c.type;
+			for (int p = c.firstPoly; p < c.firstPoly + c.numPolys; p++)
+			{
+				g_BodyPolys.Push(p);
+			}
+			bodies.PushArray(body);
+		}
+
+		int checksum;
+		Format(suffix, sizeof suffix, "_clips%d", fileIndex);
+		bool written = WriteStudioModel(map, suffix, bodies, g_CLIP_MATERIALS, MAX_CLIP_TYPES, path, sizeof path, checksum);
+		delete bodies;
+		if (!written)
+		{
+			LogError("Could not write the clip model %d for %s", fileIndex, map);
+			g_Clips.Resize(start);
+			break;
+		}
+
+		bundle = RollChecksum(bundle, checksum);
+		PrecacheModel(path, false);
+		AddPushModel(path);
+		g_ClipFiles.PushString(path);
+		for (int i = start; i < end; i++)
+		{
+			g_Clips.GetArray(i, c);
+			c.file = fileIndex;
+			c.body = MAX_CLIP_TYPES + i - start;
+			g_Clips.SetArray(i, c);
+		}
+		PrintToServer("%d clip brushes in %s", end - start, path);
+
+		start = end;
+		fileIndex++;
+	}
+
+	bool present[MAX_CLIP_TYPES];
+	for (int i = 0; i < g_Clips.Length; i++)
+	{
+		g_Clips.GetArray(i, c);
+		present[c.type] = true;
+	}
+	for (int type = 0; type < MAX_CLIP_TYPES; type++)
+	{
+		if (present[type])
+		{
+			Format(path, sizeof path, "materials/supershowtriggers/%s.vmt", g_CLIP_MATERIALS[type]);
+			AddPushFile(path);
+		}
+	}
+	return bundle;
+}
+
+int BuildFace(const int[] planeNums, int planeCount, int faceIndex)
+{
+	ArrayList planes = g_Lumps[LUMP_PLANES];
 	float plane[4];
 	planes.GetArray(planeNums[faceIndex], plane, 4);
 
@@ -1706,6 +2525,27 @@ int ChopWinding(int count, const float plane[4])
 	return out;
 }
 
+int SpawnModelProp(const char[] model, int body, const float mins[3], const float maxs[3])
+{
+	int prop = CreateEntityByName("prop_dynamic_override");
+	if (prop == -1)
+	{
+		return -1;
+	}
+	DispatchKeyValue(prop, "model", "models/error.mdl");
+	DispatchKeyValue(prop, "solid", "0");
+	DispatchKeyValue(prop, "disableshadows", "1");
+	DispatchKeyValue(prop, "disablereceiveshadows", "1");
+	DispatchSpawn(prop);
+	SetEntityModel(prop, model);
+	SetEntProp(prop, Prop_Send, "m_nBody", body);
+	SetEntPropVector(prop, Prop_Send, "m_vecMins", mins);
+	SetEntPropVector(prop, Prop_Send, "m_vecMaxs", maxs);
+	SetEntityRenderMode(prop, RENDER_TRANSCOLOR);
+	SetEntityRenderColor(prop, 255, 255, 255, 255);
+	return prop;
+}
+
 void SpawnProxyIfFaceless(int trigger, int type)
 {
 	if (g_sModelPath[0] == '\0')
@@ -1725,53 +2565,146 @@ void SpawnProxyIfFaceless(int trigger, int type)
 		return;
 	}
 
-	int prop = CreateEntityByName("prop_dynamic_override");
+	float origin[3], mins[3], maxs[3];
+	GetEntPropVector(trigger, Prop_Send, "m_vecOrigin", origin);
+	GetEntPropVector(trigger, Prop_Data, "m_vecMins", mins);
+	GetEntPropVector(trigger, Prop_Data, "m_vecMaxs", maxs);
+	int prop = SpawnModelProp(g_sModelPath, body, mins, maxs);
 	if (prop == -1)
 	{
 		return;
 	}
-	DispatchKeyValue(prop, "model", "models/error.mdl");
-	DispatchKeyValue(prop, "solid", "0");
-	DispatchKeyValue(prop, "disableshadows", "1");
-	DispatchKeyValue(prop, "disablereceiveshadows", "1");
-
-	float origin[3], mins[3], maxs[3];
-	GetEntPropVector(trigger, Prop_Send, "m_vecOrigin", origin);
 	TeleportEntity(prop, origin, NULL_VECTOR, NULL_VECTOR);
-	DispatchSpawn(prop);
-	SetEntityModel(prop, g_sModelPath);
-	SetEntProp(prop, Prop_Send, "m_nBody", body);
-
-	GetEntPropVector(trigger, Prop_Data, "m_vecMins", mins);
-	GetEntPropVector(trigger, Prop_Data, "m_vecMaxs", maxs);
-	SetEntPropVector(prop, Prop_Send, "m_vecMins", mins);
-	SetEntPropVector(prop, Prop_Send, "m_vecMaxs", maxs);
 
 	g_iProxyTrigger[prop] = trigger;
 	g_iProxyType[prop] = type;
-	SetBrushVisible(prop, type, g_bHooked);
+	SetBrushVisible(prop, HookForType(type), g_bHooked);
 }
 
-bool WriteTriggerModel(const char[] map)
+void SpawnClipTypeProps()
 {
-	int n = g_ModelPolys.Length;
+	for (int ent = 0; ent < sizeof g_iClipPropType; ent++)
+	{
+		if (g_iClipPropType[ent] != -1)
+		{
+			return;
+		}
+	}
+
+	char path[PLATFORM_MAX_PATH];
+	Clip c;
+	for (int file = 0; file < g_ClipFiles.Length; file++)
+	{
+		g_ClipFiles.GetString(file, path, sizeof path);
+		for (int type = 0; type < MAX_CLIP_TYPES; type++)
+		{
+			float mins[3] = {1.0e30, ...}, maxs[3] = {-1.0e30, ...};
+			bool any = false;
+			for (int i = 0; i < g_Clips.Length; i++)
+			{
+				g_Clips.GetArray(i, c);
+				if (c.file != file || c.type != type)
+				{
+					continue;
+				}
+				any = true;
+				for (int k = 0; k < 3; k++)
+				{
+					if (c.mins[k] < mins[k]) mins[k] = c.mins[k];
+					if (c.maxs[k] > maxs[k]) maxs[k] = c.maxs[k];
+				}
+			}
+			if (!any)
+			{
+				continue;
+			}
+			int prop = SpawnModelProp(path, type, mins, maxs);
+			if (prop == -1)
+			{
+				continue;
+			}
+			g_iClipPropType[prop] = type;
+			SetBrushVisible(prop, hookST_ClipType, g_bHooked);
+		}
+	}
+}
+
+void EnsureClipProp(int clip)
+{
+	Clip c;
+	g_Clips.GetArray(clip, c);
+	if (c.prop != -1 || c.file == -1)
+	{
+		return;
+	}
+	char path[PLATFORM_MAX_PATH];
+	g_ClipFiles.GetString(c.file, path, sizeof path);
+	int prop = SpawnModelProp(path, c.body, c.mins, c.maxs);
+	if (prop == -1)
+	{
+		return;
+	}
+	g_iClipPropClip[prop] = clip;
+	c.prop = prop;
+	g_Clips.SetArray(clip, c);
+	SetBrushVisible(prop, hookST_Clip, g_bHooked);
+}
+
+void PruneClipProps()
+{
+	Clip c;
+	for (int i = 0; i < g_Clips.Length; i++)
+	{
+		g_Clips.GetArray(i, c);
+		if (c.prop == -1)
+		{
+			continue;
+		}
+
+		bool wanted = false;
+		for (int client = 1; client <= MaxClients && !wanted; client++)
+		{
+			if (!IsClientInGame(client))
+			{
+				continue;
+			}
+			wanted = g_iHighlightedClip[client] == i || g_SelectedClips[client].FindValue(i) != -1;
+		}
+		if (wanted)
+		{
+			continue;
+		}
+
+		if (IsValidEntity(c.prop))
+		{
+			RemoveEntity(c.prop);
+		}
+		g_iClipPropClip[c.prop] = -1;
+		c.prop = -1;
+		g_Clips.SetArray(i, c);
+	}
+}
+
+bool WriteStudioModel(const char[] map, const char[] suffix, ArrayList bodies, const char[][] materials, int numMaterials, char[] outPath, int outLen, int &checksum)
+{
+	int n = bodies.Length;
 	int[] numVerts = new int[n];
 	int[] numTris = new int[n];
 	int[] vertBase = new int[n];
 	int[] indexBase = new int[n];
 	int totalVerts, totalIndices;
-	int checksum = StringToInt(MODEL_VERSION);
+	checksum = StringToInt(MODEL_VERSION);
 	float bmin[3] = {1.0e30, ...}, bmax[3] = {-1.0e30, ...}, point[3];
-	int range[2], poly[2];
+	int body[3], poly[2];
 
 	for (int i = 0; i < n; i++)
 	{
 		vertBase[i] = totalVerts;
 		indexBase[i] = totalIndices;
-		g_ModelPolys.GetArray(i, range);
-		for (int p = range[0]; p < range[0] + range[1]; p++)
+		bodies.GetArray(i, body);
+		for (int e = body[0]; e < body[0] + body[1]; e++)
 		{
-			g_Polys.GetArray(p, poly);
+			g_Polys.GetArray(g_BodyPolys.Get(e), poly);
 			numVerts[i] += poly[1];
 			numTris[i] += poly[1] - 2;
 			for (int v = poly[0]; v < poly[0] + poly[1]; v++)
@@ -1779,7 +2712,7 @@ bool WriteTriggerModel(const char[] map)
 				g_PolyVerts.GetArray(v, point);
 				for (int k = 0; k < 3; k++)
 				{
-					checksum = ((checksum << 1) | (checksum >>> 31)) ^ view_as<int>(point[k]);
+					checksum = RollChecksum(checksum, view_as<int>(point[k]));
 					if (point[k] < bmin[k]) bmin[k] = point[k];
 					if (point[k] > bmax[k]) bmax[k] = point[k];
 				}
@@ -1788,7 +2721,7 @@ bool WriteTriggerModel(const char[] map)
 		totalVerts += numVerts[i];
 		totalIndices += numTris[i] * 3;
 	}
-	if (totalVerts == 0 || totalVerts > 65535)
+	if (totalVerts == 0 || totalVerts > MAX_MODEL_VERTS)
 	{
 		return false;
 	}
@@ -1799,13 +2732,12 @@ bool WriteTriggerModel(const char[] map)
 	}
 
 	char base[PLATFORM_MAX_PATH], path[PLATFORM_MAX_PATH], mdlName[64];
-	Format(base, sizeof base, "models/supershowtriggers/%s_%08x", map, checksum);
-	Format(mdlName, sizeof mdlName, "supershowtriggers/%s_%08x.mdl", map, checksum);
+	Format(base, sizeof base, "models/supershowtriggers/%s_%08x%s", map, checksum, suffix);
+	Format(mdlName, sizeof mdlName, "supershowtriggers/%s_%08x%s.mdl", map, checksum, suffix);
+	Format(outPath, outLen, "%s.mdl", base);
 	Format(path, sizeof path, "%s.dx90.vtx", base);
-	Format(g_sModelBase, sizeof g_sModelBase, "%s_%08x", map, checksum);
 	if (FileExists(path, true, "GAME"))
 	{
-		Format(g_sModelPath, sizeof g_sModelPath, "%s.mdl", base);
 		return true;
 	}
 	CreateDirectory("models", FPERM_U_READ|FPERM_U_WRITE|FPERM_U_EXEC|FPERM_G_READ|FPERM_G_EXEC|FPERM_O_READ|FPERM_O_EXEC, true, "DEFAULT_WRITE_PATH");
@@ -1825,20 +2757,24 @@ bool WriteTriggerModel(const char[] map)
 	int OFF_MODELS = OFF_BODYPART + 16;
 	int OFF_MESHES = OFF_MODELS + 148 * n;
 	int OFF_TEXTURE = OFF_MESHES + 116 * n;
-	int OFF_CDTEXTURE = OFF_TEXTURE + 64;
+	int OFF_CDTEXTURE = OFF_TEXTURE + 64 * numMaterials;
 	int OFF_SKIN = OFF_CDTEXTURE + 4;
-	int OFF_STRINGS = OFF_SKIN + 4;
+	int OFF_STRINGS = OFF_SKIN + ((2 * numMaterials + 3) & ~3);
 
 	static const char strings[][] = { "default", "static_prop", "@idle", "idle", "body" };
-	static const char material[] = "trigger" ... MODEL_VERSION;
 	int STR_NAME = OFF_STRINGS + 1;
 	int STR_DEFAULT = STR_NAME + strlen(mdlName) + 1;
 	int STR_STATICPROP = STR_DEFAULT + 8;
 	int STR_IDLEANIM = STR_STATICPROP + 12;
 	int STR_IDLE = STR_IDLEANIM + 6;
 	int STR_BODY = STR_IDLE + 5;
-	int STR_TRIGGER = STR_BODY + 5;
-	int STR_CDTEXTURE = STR_TRIGGER + sizeof material;
+	int[] strMaterial = new int[numMaterials];
+	int STR_CDTEXTURE = STR_BODY + 5;
+	for (int i = 0; i < numMaterials; i++)
+	{
+		strMaterial[i] = STR_CDTEXTURE;
+		STR_CDTEXTURE += strlen(materials[i]) + 1;
+	}
 	int MDL_LENGTH = (STR_CDTEXTURE + 19 + 3) & ~3;
 
 	Format(path, sizeof path, "%s.mdl", base);
@@ -1864,9 +2800,9 @@ bool WriteTriggerModel(const char[] map)
 	WriteInt(f, 1); WriteInt(f, OFF_ANIMDESC);
 	WriteInt(f, 1); WriteInt(f, OFF_SEQDESC);
 	WriteInt(f, 0); WriteInt(f, 0);
-	WriteInt(f, 1); WriteInt(f, OFF_TEXTURE);
+	WriteInt(f, numMaterials); WriteInt(f, OFF_TEXTURE);
 	WriteInt(f, 1); WriteInt(f, OFF_CDTEXTURE);
-	WriteInt(f, 1); WriteInt(f, 1); WriteInt(f, OFF_SKIN);
+	WriteInt(f, numMaterials); WriteInt(f, 1); WriteInt(f, OFF_SKIN);
 	WriteInt(f, 1); WriteInt(f, OFF_BODYPART);
 	WriteInt(f, 0); WriteInt(f, OFF_HITBOXSET);
 	WriteInt(f, 0); WriteInt(f, OFF_BODYPART); WriteInt(f, OFF_BODYPART);
@@ -1954,10 +2890,10 @@ bool WriteTriggerModel(const char[] map)
 	for (int i = 0; i < n; i++)
 	{
 		int offModel = OFF_MODELS + 148 * i;
-		Format(modelName, sizeof modelName, "trigger%d", i);
+		Format(modelName, sizeof modelName, "body%d", i);
 		WritePaddedString(f, modelName, 64);
 		WriteInt(f, 0); WriteFloat(f, 0.0);
-		WriteInt(f, 1); WriteInt(f, OFF_MESHES + 116 * i - offModel);
+		WriteInt(f, numVerts[i] > 0 ? 1 : 0); WriteInt(f, OFF_MESHES + 116 * i - offModel);
 		WriteInt(f, numVerts[i]); WriteInt(f, vertBase[i] * 48); WriteInt(f, vertBase[i] * 16);
 		WriteInt(f, 0); WriteInt(f, 0);
 		WriteInt(f, 0); WriteInt(f, OFF_MESHES + 116 * (i + 1) - offModel);
@@ -1966,7 +2902,8 @@ bool WriteTriggerModel(const char[] map)
 
 	for (int i = 0; i < n; i++)
 	{
-		WriteInt(f, 0); WriteInt(f, OFF_MODELS + 148 * i - (OFF_MESHES + 116 * i));
+		bodies.GetArray(i, body);
+		WriteInt(f, body[2]); WriteInt(f, OFF_MODELS + 148 * i - (OFF_MESHES + 116 * i));
 		WriteInt(f, numVerts[i]); WriteInt(f, 0);
 		WriteInt(f, 0); WriteInt(f, 0); WriteInt(f, 0); WriteInt(f, 0);
 		WriteInt(f, i);
@@ -1976,9 +2913,16 @@ bool WriteTriggerModel(const char[] map)
 		WriteZeros(f, 32);
 	}
 
-	WriteInt(f, STR_TRIGGER - OFF_TEXTURE); WriteZeros(f, 60);
+	for (int i = 0; i < numMaterials; i++)
+	{
+		WriteInt(f, strMaterial[i] - (OFF_TEXTURE + 64 * i)); WriteZeros(f, 60);
+	}
 	WriteInt(f, STR_CDTEXTURE);
-	WriteInt(f, 0);
+	for (int i = 0; i < numMaterials; i++)
+	{
+		WriteShort(f, i);
+	}
+	WriteZeros(f, OFF_STRINGS - OFF_SKIN - 2 * numMaterials);
 
 	WriteFileCell(f, 0, 1);
 	WriteFileString(f, mdlName, true);
@@ -1986,7 +2930,10 @@ bool WriteTriggerModel(const char[] map)
 	{
 		WriteFileString(f, strings[k], true);
 	}
-	WriteFileString(f, material, true);
+	for (int i = 0; i < numMaterials; i++)
+	{
+		WriteFileString(f, materials[i], true);
+	}
 	WriteFileString(f, "supershowtriggers/", true);
 	WriteZeros(f, MDL_LENGTH - (STR_CDTEXTURE + 19));
 	delete f;
@@ -2005,25 +2952,29 @@ bool WriteTriggerModel(const char[] map)
 	float normal[3], tangent[3];
 	for (int pass = 0; pass < 2; pass++)
 	{
-		for (int p = 0; p < g_Polys.Length; p++)
+		for (int i = 0; i < n; i++)
 		{
-			g_Polys.GetArray(p, poly);
-			PolygonNormal(poly[0], normal);
-			for (int v = poly[0]; v < poly[0] + poly[1]; v++)
+			bodies.GetArray(i, body);
+			for (int e = body[0]; e < body[0] + body[1]; e++)
 			{
-				g_PolyVerts.GetArray(v, point);
-				if (pass == 0)
+				g_Polys.GetArray(g_BodyPolys.Get(e), poly);
+				PolygonNormal(poly[0], normal);
+				for (int v = poly[0]; v < poly[0] + poly[1]; v++)
 				{
-					WriteFloat(f, 1.0); WriteFloat(f, 0.0); WriteFloat(f, 0.0); WriteInt(f, 0x01000000);
-					WriteVec(f, point);
-					WriteVec(f, normal);
-					WritePlanarUV(f, point, normal);
-				}
-				else
-				{
-					TangentFor(normal, tangent);
-					WriteVec(f, tangent);
-					WriteFloat(f, 1.0);
+					g_PolyVerts.GetArray(v, point);
+					if (pass == 0)
+					{
+						WriteFloat(f, 1.0); WriteFloat(f, 0.0); WriteFloat(f, 0.0); WriteInt(f, 0x01000000);
+						WriteVec(f, point);
+						WriteVec(f, normal);
+						WritePlanarUV(f, point, normal);
+					}
+					else
+					{
+						TangentFor(normal, tangent);
+						WriteVec(f, tangent);
+						WriteFloat(f, 1.0);
+					}
 				}
 			}
 		}
@@ -2056,7 +3007,7 @@ bool WriteTriggerModel(const char[] map)
 	}
 	for (int i = 0; i < n; i++)
 	{
-		WriteInt(f, 1); WriteInt(f, (OFF_VTX_MESH + 9 * i) - (OFF_VTX_LOD + 12 * i)); WriteFloat(f, 0.0);
+		WriteInt(f, numVerts[i] > 0 ? 1 : 0); WriteInt(f, (OFF_VTX_MESH + 9 * i) - (OFF_VTX_LOD + 12 * i)); WriteFloat(f, 0.0);
 	}
 	for (int i = 0; i < n; i++)
 	{
@@ -2087,11 +3038,11 @@ bool WriteTriggerModel(const char[] map)
 	}
 	for (int i = 0; i < n; i++)
 	{
-		g_ModelPolys.GetArray(i, range);
+		bodies.GetArray(i, body);
 		int first = 0;
-		for (int p = range[0]; p < range[0] + range[1]; p++)
+		for (int e = body[0]; e < body[0] + body[1]; e++)
 		{
-			g_Polys.GetArray(p, poly);
+			g_Polys.GetArray(g_BodyPolys.Get(e), poly);
 			for (int k = 1; k < poly[1] - 1; k++)
 			{
 				WriteShort(f, first); WriteShort(f, first + k); WriteShort(f, first + k + 1);
@@ -2106,7 +3057,6 @@ bool WriteTriggerModel(const char[] map)
 	WriteInt(f, 0); WriteInt(f, 0);
 	delete f;
 
-	Format(g_sModelPath, sizeof g_sModelPath, "%s.mdl", base);
 	return true;
 }
 
@@ -2195,37 +3145,26 @@ void WritePaddedString(File f, const char[] str, int length)
 	WriteZeros(f, length - len);
 }
 
-void SetPushFiles()
-{
-	strcopy(g_sPushFiles[0], PLATFORM_MAX_PATH, "materials/supershowtriggers/trigger" ... MODEL_VERSION ... ".vmt");
-	for (int i = 1; i < 4; i++)
-	{
-		strcopy(g_sPushFiles[i], PLATFORM_MAX_PATH, g_sModelPath);
-	}
-	ReplaceString(g_sPushFiles[2], PLATFORM_MAX_PATH, ".mdl", ".vvd");
-	ReplaceString(g_sPushFiles[3], PLATFORM_MAX_PATH, ".mdl", ".dx90.vtx");
-
-	g_iPushTotal = 0;
-	for (int i = 0; i < 4; i++)
-	{
-		g_iPushSize[i] = FileSize(g_sPushFiles[i], true, "GAME");
-		g_iPushTotal += g_iPushSize[i];
-	}
-}
-
 int PushFileIndex(const char[] name)
 {
-	char path[PLATFORM_MAX_PATH];
+	char path[PLATFORM_MAX_PATH], file[PLATFORM_MAX_PATH];
 	strcopy(path, sizeof path, name);
 	ReplaceString(path, sizeof path, "\\", "/");
-	for (int i = 0; i < 4; i++)
+	for (int i = 0; i < g_PushFiles.Length; i++)
 	{
-		if (StrEqual(path, g_sPushFiles[i], false))
+		g_PushFiles.GetString(i, file, sizeof file);
+		if (StrEqual(path, file, false))
 		{
 			return i;
 		}
 	}
 	return -1;
+}
+
+bool IsVerifyFile(const char[] path)
+{
+	int len = strlen(path);
+	return len > 4 && (StrEqual(path[len - 4], ".vmt") || StrEqual(path[len - 4], ".mdl"));
 }
 
 int ClientOfHandler(Address handler)
@@ -2242,7 +3181,7 @@ int ClientOfHandler(Address handler)
 
 void EnsureClientModel(int client)
 {
-	if (g_bModelBusy[client] || IsFakeClient(client))
+	if (g_bModelBusy[client] || IsFakeClient(client) || g_PushFiles.Length == 0)
 	{
 		return;
 	}
@@ -2258,7 +3197,7 @@ public void OnAllowUploadQueried(QueryCookie cookie, int client, ConVarQueryResu
 	}
 	if (result == ConVarQuery_Okay && StringToInt(cvarValue) == 0)
 	{
-		PrintToChat(client, "%sNodraw triggers need %ssv_allowupload 1%s in your console and a reconnect.", WHITE, GOLD, WHITE);
+		PrintToChat(client, "%sNodraw triggers and clips need %ssv_allowupload 1%s in your console and a reconnect.", WHITE, GOLD, WHITE);
 		return;
 	}
 
@@ -2292,12 +3231,19 @@ void VerifyModel(int client)
 		g_iHandlerHooks[client][1] = g_hFileDenied.HookRaw(Hook_Post, g_MsgHandler[client], OnFileDenied);
 	}
 
-	g_iVerifyPending[client] = 2;
+	g_iVerifyPending[client] = 0;
 	g_iVerifyTicks[client] = 0;
-	for (int i = 0; i < 2; i++)
+	char path[PLATFORM_MAX_PATH];
+	for (int i = 0; i < g_PushFiles.Length; i++)
 	{
-		DeleteFile(g_sPushFiles[i], true, "download");
-		SDKCall(g_hRequestFile, netchan, g_sPushFiles[i]);
+		g_PushFiles.GetString(i, path, sizeof path);
+		if (!IsVerifyFile(path))
+		{
+			continue;
+		}
+		g_iVerifyPending[client]++;
+		DeleteFile(path, true, "download");
+		SDKCall(g_hRequestFile, netchan, path);
 	}
 	CreateTimer(0.1, Timer_VerifyPoll, GetClientUserId(client), TIMER_REPEAT|TIMER_FLAG_NO_MAPCHANGE);
 }
@@ -2381,12 +3327,15 @@ void PushModel(int client)
 		return;
 	}
 
+	SDKCall(g_hSetFileTransmissionMode, netchan, false);
 	bool sent = true;
-	for (int i = 0; i < 4; i++)
+	char path[PLATFORM_MAX_PATH];
+	for (int i = 0; i < g_PushFiles.Length; i++)
 	{
-		if (!SDKCall(g_hSendFile, netchan, g_sPushFiles[i], i + 1))
+		g_PushFiles.GetString(i, path, sizeof path);
+		if (!SDKCall(g_hSendFile, netchan, path, i + 1))
 		{
-			LogError("SendFile of %s to %N failed", g_sPushFiles[i], client);
+			LogError("SendFile of %s to %N failed", path, client);
 			sent = false;
 		}
 	}
@@ -2396,7 +3345,7 @@ void PushModel(int client)
 	}
 
 	g_iPushNext[client] = 10;
-	PrintToChat(client, "%sDownloading nodraw trigger models (%s%.1f MB%s), they show up once done.",
+	PrintToChat(client, "%sDownloading trigger and clip models (%s%.1f MB%s), they show up once done.",
 		WHITE, GOLD, g_iPushTotal / 1048576.0, WHITE);
 	CreateTimer(1.0, Timer_CheckDelivery, GetClientUserId(client), TIMER_REPEAT|TIMER_FLAG_NO_MAPCHANGE);
 }
@@ -2418,21 +3367,22 @@ public Action Timer_CheckDelivery(Handle timer, int userId)
 	int remaining = LoadFromAddress(netchan + view_as<Address>(g_iFileStreamCount), NumberType_Int32);
 	if (remaining > 0)
 	{
-		int current = 4 - remaining;
+		int current = g_PushFiles.Length - remaining;
 		int done = 0;
 		for (int i = 0; i < current; i++)
 		{
-			done += g_iPushSize[i];
+			done += g_PushSizes.Get(i);
 		}
 		int received, total;
 		if (current >= 0 && SDKCall(g_hGetStreamProgress, netchan, 0, received, total))
 		{
-			done += received < g_iPushSize[current] ? received : g_iPushSize[current];
+			int size = g_PushSizes.Get(current);
+			done += received < size ? received : size;
 		}
 		int percent = done * 100 / g_iPushTotal;
 		if (percent >= g_iPushNext[client] && percent < 100)
 		{
-			PrintToChat(client, "%sNodraw trigger models: %s%d%%", WHITE, GOLD, percent);
+			PrintToChat(client, "%sTrigger and clip models: %s%d%%", WHITE, GOLD, percent);
 			while (g_iPushNext[client] <= percent)
 			{
 				g_iPushNext[client] += 10;
@@ -2441,9 +3391,10 @@ public Action Timer_CheckDelivery(Handle timer, int userId)
 		return Plugin_Continue;
 	}
 
+	SDKCall(g_hSetFileTransmissionMode, netchan, true);
 	g_bClientHasModel[client] = true;
 	g_bModelBusy[client] = false;
-	PrintToChat(client, "%sNodraw trigger models: %sdone", WHITE, GREEN);
+	PrintToChat(client, "%sTrigger and clip models: %sdone", WHITE, GREEN);
 
 	char steamId[32];
 	if (GetClientAuthId(client, AuthId_Steam2, steamId, sizeof steamId))
@@ -2467,7 +3418,12 @@ public void OnDatabaseConnected(Database db, const char[] error, any data)
 	g_DB = db;
 	g_DB.Query(OnQueryDone, "CREATE TABLE IF NOT EXISTS st_selections ("
 		... "steamid VARCHAR(32) NOT NULL, map VARCHAR(128) NOT NULL, name VARCHAR(64) NOT NULL, "
-		... "hammerids TEXT NOT NULL, updated INTEGER NOT NULL, PRIMARY KEY (steamid, map))");
+		... "hammerids TEXT NOT NULL, clips TEXT NOT NULL DEFAULT '', updated INTEGER NOT NULL, PRIMARY KEY (steamid, map))");
+	g_DB.Query(OnColumnAdded, "ALTER TABLE st_selections ADD COLUMN clips TEXT NOT NULL DEFAULT ''");
+}
+
+public void OnColumnAdded(Database db, DBResultSet results, const char[] error, any data)
+{
 }
 
 public void OnQueryDone(Database db, DBResultSet results, const char[] error, any data)
@@ -2498,13 +3454,23 @@ void SaveSelection(int client)
 		}
 	}
 
+	int clipCount = g_SelectedClips[client].Length;
+	char[] clips = new char[clipCount * 12 + 1];
+	clips[0] = '\0';
+	Clip c;
+	for (int i = 0; i < clipCount; i++)
+	{
+		g_Clips.GetArray(g_SelectedClips[client].Get(i), c);
+		Format(clips, clipCount * 12 + 1, "%s%s%d", clips, clips[0] ? "," : "", c.brush);
+	}
+
 	char name[MAX_NAME_LENGTH], map[PLATFORM_MAX_PATH];
 	GetClientName(client, name, sizeof name);
 	GetCurrentMap(map, sizeof map);
-	int length = strlen(ids) + 512;
+	int length = strlen(ids) + strlen(clips) + 512;
 	char[] query = new char[length];
-	g_DB.Format(query, length, "REPLACE INTO st_selections (steamid, map, name, hammerids, updated) VALUES ('%s', '%s', '%s', '%s', %d)",
-		steamId, map, name, ids, GetTime());
+	g_DB.Format(query, length, "REPLACE INTO st_selections (steamid, map, name, hammerids, clips, updated) VALUES ('%s', '%s', '%s', '%s', '%s', %d)",
+		steamId, map, name, ids, clips, GetTime());
 	g_DB.Query(OnQueryDone, query);
 }
 
@@ -2536,7 +3502,7 @@ void LoadSelection(int client, const char[] ownerId, bool announce)
 		return;
 	}
 	GetCurrentMap(map, sizeof map);
-	g_DB.Format(query, sizeof query, "SELECT name, hammerids FROM st_selections WHERE steamid = '%s' AND map = '%s'", steamId, map);
+	g_DB.Format(query, sizeof query, "SELECT name, hammerids, clips FROM st_selections WHERE steamid = '%s' AND map = '%s'", steamId, map);
 
 	DataPack pack = new DataPack();
 	pack.WriteCell(GetClientUserId(client));
@@ -2571,15 +3537,16 @@ public void OnSelectionLoaded(Database db, DBResultSet results, const char[] err
 		return;
 	}
 
-	char name[MAX_NAME_LENGTH], ids[4096];
+	char name[MAX_NAME_LENGTH], ids[4096], clips[4096];
 	results.FetchString(0, name, sizeof name);
 	results.FetchString(1, ids, sizeof ids);
-	ApplySelection(client, ids, copied ? name : "");
+	results.FetchString(2, clips, sizeof clips);
+	ApplySelection(client, ids, clips, copied ? name : "");
 }
 
-int ResolveHammerIds(const char[] ids, ArrayList entities)
+int ResolveIds(const char[] ids, StringMap lookup, ArrayList out)
 {
-	int count = 0, entity, start = 0;
+	int count = 0, value, start = 0;
 	char id[16];
 	while (start != -1)
 	{
@@ -2593,11 +3560,11 @@ int ResolveHammerIds(const char[] ids, ArrayList entities)
 		{
 			start += next;
 		}
-		if (id[0] && g_TriggerByHammerId.GetValue(id, entity) && IsValidEntity(entity))
+		if (id[0] && lookup.GetValue(id, value) && (lookup == g_ClipByBrush || IsValidEntity(value)))
 		{
-			if (entities != null)
+			if (out != null)
 			{
-				entities.Push(entity);
+				out.Push(value);
 			}
 			count++;
 		}
@@ -2605,32 +3572,41 @@ int ResolveHammerIds(const char[] ids, ArrayList entities)
 	return count;
 }
 
-void ApplySelection(int client, const char[] ids, const char[] owner)
+int ResolveSelection(const char[] ids, const char[] clips, ArrayList triggers, ArrayList clipList)
+{
+	return ResolveIds(ids, g_TriggerByHammerId, triggers) + ResolveIds(clips, g_ClipByBrush, clipList);
+}
+
+void ApplySelection(int client, const char[] ids, const char[] clips, const char[] owner)
 {
 	g_SelectedTriggers[client].Clear();
-	int count = ResolveHammerIds(ids, g_SelectedTriggers[client]);
+	g_SelectedClips[client].Clear();
+	int count = ResolveSelection(ids, clips, g_SelectedTriggers[client], g_SelectedClips[client]);
+	PruneClipProps();
 	if (count == 0)
 	{
-		PrintToChat(client, "%sThat selection has no triggers on this map.", WHITE);
+		PrintToChat(client, "%sThat selection has no triggers or clips on this map.", WHITE);
 		return;
+	}
+
+	for (int i = 0; i < g_SelectedClips[client].Length; i++)
+	{
+		EnsureClipProp(g_SelectedClips[client].Get(i));
 	}
 
 	g_bUseSelectionMode[client] = true;
 	g_bSelectMode[client] = false;
-	for (int i = 0; i < MAX_TYPES; i++)
-	{
-		g_bTypeEnabled[client][i] = true;
-	}
+	SetAllTypes(client, true);
 	CheckBrushes(ShouldRender());
 
 	if (owner[0])
 	{
-		PrintToChat(client, "%sCopied %s%s%s's selection: %s%d%s triggers. Use %s!confirm%s to keep it as yours.",
+		PrintToChat(client, "%sCopied %s%s%s's selection: %s%d%s brushes. Use %s!confirm%s to keep it as yours.",
 			WHITE, GOLD, owner, WHITE, GOLD, count, WHITE, GREEN, WHITE);
 	}
 	else
 	{
-		PrintToChat(client, "%sLoaded your saved selection: %s%d%s triggers.", WHITE, GOLD, count, WHITE);
+		PrintToChat(client, "%sLoaded your saved selection: %s%d%s brushes.", WHITE, GOLD, count, WHITE);
 	}
 }
 
@@ -2671,7 +3647,7 @@ void ShowProfileList(int client)
 		return;
 	}
 	GetCurrentMap(map, sizeof map);
-	g_DB.Format(query, sizeof query, "SELECT steamid, name, hammerids FROM st_selections WHERE map = '%s' AND steamid <> '%s' ORDER BY updated DESC",
+	g_DB.Format(query, sizeof query, "SELECT steamid, name, hammerids, clips FROM st_selections WHERE map = '%s' AND steamid <> '%s' ORDER BY updated DESC",
 		map, steamId);
 	g_DB.Query(OnProfileListLoaded, query, GetClientUserId(client));
 }
@@ -2693,13 +3669,14 @@ public void OnProfileListLoaded(Database db, DBResultSet results, const char[] e
 	menu.SetTitle("Copy from player");
 	menu.ExitBackButton = true;
 
-	char steamId[32], name[MAX_NAME_LENGTH], ids[4096], text[MAX_NAME_LENGTH + 16];
+	char steamId[32], name[MAX_NAME_LENGTH], ids[4096], clips[4096], text[MAX_NAME_LENGTH + 16];
 	while (results.FetchRow())
 	{
 		results.FetchString(0, steamId, sizeof steamId);
 		results.FetchString(1, name, sizeof name);
 		results.FetchString(2, ids, sizeof ids);
-		int count = ResolveHammerIds(ids, null);
+		results.FetchString(3, clips, sizeof clips);
+		int count = ResolveSelection(ids, clips, null, null);
 		if (count > 0)
 		{
 			Format(text, sizeof text, "%s (%d)", name, count);

@@ -46,6 +46,12 @@
 				"windows"	"59"
 				"linux"		"60"
 			}
+			// INetChannel::SetFileTransmissionMode(bool bBackgroundMode)
+			"SetFileTransmissionMode"
+			{
+				"windows"	"57"
+				"linux"		"58"
+			}
 			// INetChannelHandler::FileReceived(const char *fileName, unsigned int transferID)
 			"FileReceived"
 			{

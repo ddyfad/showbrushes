@@ -1,0 +1,5 @@
+"UnlitGeneric"
+{
+	"$basetexture" "Tools/toolsinvisible"
+	"$translucent" 1
+}

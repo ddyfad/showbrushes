@@ -1,36 +1,40 @@
 # super showtriggers
 
-This plugin is a [Show Triggers](https://github.com/blankbhop/improved-showtriggers) fork for SourceMod. It adds a selection mode that uses the crosshair. A player can show all triggers of a type from a menu. A player can also look at one trigger, pick it, confirm the selection, and then show or hide only the picked triggers.
+This plugin is a [Show Triggers](https://github.com/blankbhop/improved-showtriggers) fork for SourceMod. It shows triggers and clip brushes. It adds a selection mode that uses the crosshair. A player can show all triggers or clips of a type from a menu. A player can also look at one brush, pick it, confirm the selection, and then show or hide only the picked brushes.
 
 ## Features
 
 - The plugin shows `trigger_multiple`, `trigger_push`, `trigger_teleport` and `trigger_teleport_relative` brushes for each player. It removes `EF_NODRAW` from the brush and filters the brush for each player in a `SDKHook_SetTransmit` hook.
 - The plugin colors each trigger by its type. Push triggers are green. Teleports are red. A `trigger_multiple` is orange for `gravity 40` outputs, teal for `gravity -` outputs, and green for `basevelocity` outputs. The plugin reads the outputs from the entity lump of the map with the SourceMod `EntityLump` natives. It matches each output to an entity by `hammerid`.
 - Triggers with only `nodraw` textures have no faces in the BSP. The engine cannot draw them. For these triggers the plugin reads the brush planes from the map file and builds the polygons again. On map start it writes a studio model to `models/supershowtriggers/<map>_<hash>.mdl`, `.vvd` and `.dx90.vtx`. It then spawns one `prop_dynamic_override` for each trigger. The prop shows the mesh of the trigger with the same `SetTransmit` rules and colors as a brush.
-- The plugin sends the model files and `materials/supershowtriggers/trigger2.vmt` to each client over the game connection with `INetChannel::SendFile`. It shows the progress in the chat. No fastdl is necessary. The plugin precaches the model without preload. Thus a client loads the model only when the plugin sends it a stand-in prop. The plugin does not send stand-in props to a client until the transfer is complete. The plugin sends the files only to a client that turns `/st` on while the map has nodraw triggers.
+- The plugin shows the clip brushes of the world in the same way. It reads the world brushes from the map file and sorts them into five types: player clip, NPC clip, clip for both, invisible, and nodraw. The type comes from the brush contents and from the tool material of each side. The plugin writes the clip brushes to `models/supershowtriggers/<map>_<hash>_clips<n>.mdl`. Each model holds one body for each type and one body for each brush. A large map gets more than one clip model. The plugin spawns one prop for each type. It spawns a prop for a single brush only while a player aims at it or has it in a selection.
+- Each clip type shows the tool texture of Hammer. The materials are `materials/supershowtriggers/playerclip.vmt`, `npcclip.vmt`, `clip.vmt`, `invisible.vmt` and `nodraw.vmt`. They use the `tools/tools*` textures that ship with the game.
+- The plugin sends the model files and the vmt files to each client over the game connection with `INetChannel::SendFile`. It shows the progress in the chat. No fastdl is necessary. The plugin precaches the models without preload. Thus a client loads a model only when the plugin sends it a prop. The plugin does not send props to a client until the transfer is complete. The plugin sends the files only to a client that turns a trigger type or a clip type on while the map has nodraw triggers or clip brushes.
+- The engine puts the game connection of a player in a background file mode. In this mode it sends one fragment of 256 bytes for each packet. The plugin turns this mode off during a transfer and on again when the transfer is complete.
 - The plugin records each completed transfer by SteamID in `addons/sourcemod/data/supershowtriggers_delivered.txt`. When a recorded client joins the map again, the plugin asks the client for the vmt and mdl files with `INetChannel::RequestFile`. This requires `cl_allowupload 1` on the client. The plugin sends the files again only if the client does not have them or does not answer in 10 seconds. The plugin writes the reason for each repeated transfer to the SourceMod log.
-- In selection mode (`!select`) the plugin shows every trigger. The trigger under the crosshair is cyan. Picked triggers are yellow. The plugin caches all `trigger_*` entities on map start. To find the aimed trigger, it traces a ray from the eyes and stops the ray at the first world hit. It then clips the ray against the brush model of each trigger with `TR_ClipRayToEntity`. The plugin picks the trigger the player stands in only when the ray hits no other trigger.
-- After `!confirm`, `!st` shows or hides only the picked triggers. `!reset` returns to the normal mode with trigger types.
-- The settings menu has a `Selection...` submenu with the same actions: selection mode, pick, confirm, clear, and reset. Selection does not require chat commands.
-- The plugin saves each confirmed selection for the player and the map. It stores the trigger `hammerid` values in the `st_selections` table of the SourceMod `storage-local` SQLite database. When the player joins that map again, the plugin loads the selection and shows the triggers. `!reset` deletes the saved selection. The `Profile` entry of the selection submenu loads your saved selection. It can also copy the saved selection of a different player for the current map. A copy becomes your saved selection only when you `!confirm` it.
+- In selection mode (`!select`) the plugin shows every trigger and every clip. The brush under the crosshair is cyan. Picked brushes are yellow. The plugin caches all `trigger_*` entities on map start. To find the aimed brush, it traces a ray from the eyes and stops the ray at the first world hit. It then clips the ray against the brush model of each trigger with `TR_ClipRayToEntity` and against the planes of each clip brush. The plugin picks the brush the player stands in only when the ray hits no other brush.
+- After `!confirm`, `!st` and `!sc` show or hide only the picked brushes. `!reset` returns to the normal mode with trigger and clip types.
+- The settings menu has a `Triggers` submenu and a `Clips` submenu with the types. It has a `Selection` submenu with the same actions as the chat commands: selection mode, pick, confirm, clear, and reset.
+- The plugin saves each confirmed selection for the player and the map. It stores the trigger `hammerid` values and the clip brush indexes in the `st_selections` table of the SourceMod `storage-local` SQLite database. When the player joins that map again, the plugin loads the selection and shows the brushes. `!reset` deletes the saved selection. The `Profile` entry of the selection submenu loads your saved selection. It can also copy the saved selection of a different player for the current map. A copy becomes your saved selection only when you `!confirm` it.
 
 ## Commands
 
 | Command | Description |
 | --- | --- |
-| `sm_showtriggers`, `sm_st` | Show or hide triggers. In normal mode this applies to `trigger_teleport`. After a confirmed selection this applies to the picked triggers. |
-| `sm_showtriggerssettings`, `sm_stsettings`, `sm_sts` | Open the settings menu with the trigger types and the selection submenu. |
+| `sm_showtriggers`, `sm_st` | Show or hide triggers. In normal mode this applies to `trigger_teleport`. After a confirmed selection this applies to the picked brushes. |
+| `sm_showclips`, `sm_sc` | Show or hide clips. In normal mode this applies to player clips. After a confirmed selection this applies to the picked brushes. |
+| `sm_showtriggerssettings`, `sm_stsettings`, `sm_sts` | Open the settings menu with the trigger types, the clip types and the selection submenu. |
 | `sm_sthelp` | Show the command list. |
 | `sm_select` | Turn the selection mode on or off. |
-| `sm_pick` | Add or remove the trigger under the crosshair. |
-| `sm_confirm` | Confirm the selection. `sm_st` then applies to the picked triggers. |
-| `sm_clear` | Remove all triggers from the selection. |
+| `sm_pick` | Add or remove the trigger or clip under the crosshair. |
+| `sm_confirm` | Confirm the selection. `sm_st` and `sm_sc` then apply to the picked brushes. |
+| `sm_clear` | Remove all brushes from the selection. |
 | `sm_reset` | Remove the selection and leave the selection mode. |
 
 ## Requirements
 
 - SourceMod 1.12 with SDKHooks and SDKTools. The `EntityLump` natives are part of 1.12.
-- `materials/supershowtriggers/trigger2.vmt` in the game directory.
+- The vmt files in `materials/supershowtriggers/` in the game directory.
 - `addons/sourcemod/gamedata/supershowtriggers.games.txt`. It contains the netchannel vtable slots and struct offsets. The Linux values are verified against the CS:S build 10897846 client and dedicated server binaries. The Windows values are derived and not verified.
 - `sv_pure 1` with these lines in `cfg/pure_server_whitelist.txt`. Without them the clients do not load the transferred files. With `sv_pure 2` the clients do not load custom files at all.
 
@@ -42,6 +46,19 @@ This plugin is a [Show Triggers](https://github.com/blankbhop/improved-showtrigg
   }
   ```
 - Clients must keep `sv_allowupload` at its default value of 1. Otherwise the engine discards the transferred files.
+- Maps with LZMA compressed lumps are not supported. The plugin does not build models for them.
+
+## Forced server settings
+
+The speed of a transfer depends on the update rate and the rate of the client. The default `cl_updaterate` of CS:S is 20. With that rate a transfer of a few megabytes takes minutes. The plugin raises these server settings when the configs are executed:
+
+| Setting | Value | Reason |
+| --- | --- | --- |
+| `sv_minrate` | 128000 | The rate must allow one full packet of fragments for each update. |
+| `sv_minupdaterate` | The tick rate of the server, at most 100 | Each update carries one packet of fragments. |
+| `sv_maxupdaterate` | The tick rate of the server, at most 100 | Only raised when the current value is lower. A value of 0 is not changed. |
+
+The plugin only raises the values. It never lowers them. The plugin writes each change to the SourceMod log. These settings apply to all players and to all traffic of the server, not only to the transfers. Remove the plugin if you do not want that.
 
 ## Building
 
