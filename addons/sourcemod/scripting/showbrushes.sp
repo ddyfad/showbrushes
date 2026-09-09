@@ -7,6 +7,8 @@
 #include <entitylump>
 #include <dhooks>
 
+#pragma dynamic 2097152
+
 #define PLUGIN_NAME "showbrushes"
 #define PLUGIN_AUTHOR "gangy & tommy"
 #define PLUGIN_DESCRIPTION "Show triggers and clip brushes with selection mode"
@@ -2009,7 +2011,7 @@ void BuildMapModels()
 		return;
 	}
 
-	int ident, version, lumpOfs[64], lumpLen[64], lumpVer[64], entry[4];
+	int ident, version, lumpOfs[64], lumpLen[64], lumpVer[64], lumpFourcc[64], entry[4];
 	ReadFileCell(f, ident, 4);
 	ReadFileCell(f, version, 4);
 	if (ident != BSP_IDENT)
@@ -2023,19 +2025,20 @@ void BuildMapModels()
 		lumpOfs[i] = entry[0];
 		lumpLen[i] = entry[1];
 		lumpVer[i] = entry[2];
+		lumpFourcc[i] = entry[3];
 	}
 
-	g_Lumps[LUMP_MODELS] = ReadLump(f, lumpOfs[LUMP_MODELS], lumpLen[LUMP_MODELS], 12, 4);
-	g_Lumps[LUMP_PLANES] = ReadLump(f, lumpOfs[LUMP_PLANES], lumpLen[LUMP_PLANES], 5, 4);
-	g_Lumps[LUMP_BRUSHES] = ReadLump(f, lumpOfs[LUMP_BRUSHES], lumpLen[LUMP_BRUSHES], 3, 4);
-	g_Lumps[LUMP_BRUSHSIDES] = ReadLump(f, lumpOfs[LUMP_BRUSHSIDES], lumpLen[LUMP_BRUSHSIDES], 4, 2);
-	g_Lumps[LUMP_NODES] = ReadLump(f, lumpOfs[LUMP_NODES], lumpLen[LUMP_NODES], 8, 4);
-	g_Lumps[LUMP_LEAFS] = ReadLump(f, lumpOfs[LUMP_LEAFS], lumpLen[LUMP_LEAFS], lumpVer[LUMP_LEAFS] == 0 ? 14 : 8, 4);
-	g_Lumps[LUMP_LEAFBRUSHES] = ReadLump(f, lumpOfs[LUMP_LEAFBRUSHES], lumpLen[LUMP_LEAFBRUSHES], 1, 2);
-	g_Lumps[LUMP_TEXINFO] = ReadLump(f, lumpOfs[LUMP_TEXINFO], lumpLen[LUMP_TEXINFO], 18, 4);
-	g_Lumps[LUMP_TEXDATA] = ReadLump(f, lumpOfs[LUMP_TEXDATA], lumpLen[LUMP_TEXDATA], 8, 4);
-	g_Lumps[LUMP_TEXSTRTBL] = ReadLump(f, lumpOfs[LUMP_TEXSTRTBL], lumpLen[LUMP_TEXSTRTBL], 1, 4);
-	g_Lumps[LUMP_TEXSTRDATA] = ReadLump(f, lumpOfs[LUMP_TEXSTRDATA], lumpLen[LUMP_TEXSTRDATA], 1, 1);
+	g_Lumps[LUMP_MODELS] = ReadLump(f, lumpOfs[LUMP_MODELS], lumpLen[LUMP_MODELS], lumpFourcc[LUMP_MODELS], 12, 4);
+	g_Lumps[LUMP_PLANES] = ReadLump(f, lumpOfs[LUMP_PLANES], lumpLen[LUMP_PLANES], lumpFourcc[LUMP_PLANES], 5, 4);
+	g_Lumps[LUMP_BRUSHES] = ReadLump(f, lumpOfs[LUMP_BRUSHES], lumpLen[LUMP_BRUSHES], lumpFourcc[LUMP_BRUSHES], 3, 4);
+	g_Lumps[LUMP_BRUSHSIDES] = ReadLump(f, lumpOfs[LUMP_BRUSHSIDES], lumpLen[LUMP_BRUSHSIDES], lumpFourcc[LUMP_BRUSHSIDES], 4, 2);
+	g_Lumps[LUMP_NODES] = ReadLump(f, lumpOfs[LUMP_NODES], lumpLen[LUMP_NODES], lumpFourcc[LUMP_NODES], 8, 4);
+	g_Lumps[LUMP_LEAFS] = ReadLump(f, lumpOfs[LUMP_LEAFS], lumpLen[LUMP_LEAFS], lumpFourcc[LUMP_LEAFS], lumpVer[LUMP_LEAFS] == 0 ? 14 : 8, 4);
+	g_Lumps[LUMP_LEAFBRUSHES] = ReadLump(f, lumpOfs[LUMP_LEAFBRUSHES], lumpLen[LUMP_LEAFBRUSHES], lumpFourcc[LUMP_LEAFBRUSHES], 1, 2);
+	g_Lumps[LUMP_TEXINFO] = ReadLump(f, lumpOfs[LUMP_TEXINFO], lumpLen[LUMP_TEXINFO], lumpFourcc[LUMP_TEXINFO], 18, 4);
+	g_Lumps[LUMP_TEXDATA] = ReadLump(f, lumpOfs[LUMP_TEXDATA], lumpLen[LUMP_TEXDATA], lumpFourcc[LUMP_TEXDATA], 8, 4);
+	g_Lumps[LUMP_TEXSTRTBL] = ReadLump(f, lumpOfs[LUMP_TEXSTRTBL], lumpLen[LUMP_TEXSTRTBL], lumpFourcc[LUMP_TEXSTRTBL], 1, 4);
+	g_Lumps[LUMP_TEXSTRDATA] = ReadLump(f, lumpOfs[LUMP_TEXSTRDATA], lumpLen[LUMP_TEXSTRDATA], lumpFourcc[LUMP_TEXSTRDATA], 1, 1);
 	delete f;
 
 	g_PolyVerts = new ArrayList(3);
@@ -2132,8 +2135,12 @@ void AddPushModel(const char[] mdl)
 	AddPushFile(path);
 }
 
-ArrayList ReadLump(File f, int ofs, int len, int cells, int cellSize)
+ArrayList ReadLump(File f, int ofs, int len, int fourcc, int cells, int cellSize)
 {
+	if (fourcc != 0)
+	{
+		return ReadCompressedLump(f, ofs, cells, cellSize);
+	}
 	int count = len / (cells * cellSize);
 	ArrayList list = new ArrayList(cells);
 	FileSeek(f, ofs, SEEK_SET);
@@ -2154,6 +2161,296 @@ ArrayList ReadLump(File f, int ofs, int len, int cells, int cellSize)
 		count -= batch;
 	}
 	return list;
+}
+
+#define LZMA_ID       0x414D5A4C
+#define LZMA_HEAP_MAX 1900000
+
+int g_LzmaCode, g_LzmaRange, g_LzmaPos;
+
+ArrayList ReadCompressedLump(File f, int ofs, int cells, int cellSize)
+{
+	int header[3], props;
+	FileSeek(f, ofs, SEEK_SET);
+	if (ReadFile(f, header, 3, 4) != 3 || header[0] != LZMA_ID || ReadFileCell(f, props, 1) != 1)
+	{
+		return null;
+	}
+	int actual = header[1], packed = header[2];
+	if (actual <= 0 || packed <= 0 || actual / 4 + packed / 4 + 210000 > LZMA_HEAP_MAX)
+	{
+		LogError("Compressed lump at %d is too large (%d bytes)", ofs, actual);
+		return null;
+	}
+
+	FileSeek(f, ofs + 17, SEEK_SET);
+	int whole = packed / 4;
+	int[] input = new int[whole + 2];
+	if (ReadFile(f, input, whole, 4) != whole)
+	{
+		return null;
+	}
+	for (int i = 0; i < (packed & 3); i++)
+	{
+		int b;
+		if (ReadFileCell(f, b, 1) != 1)
+		{
+			break;
+		}
+		input[whole] |= b << (i << 3);
+	}
+
+	int[] output = new int[actual / 4 + 1];
+	if (!LzmaDecode(input, packed, props, output, actual))
+	{
+		LogError("Could not decode the compressed lump at %d", ofs);
+		return null;
+	}
+
+	int count = actual / (cells * cellSize);
+	ArrayList list = new ArrayList(cells);
+	for (int i = 0; i < count; i++)
+	{
+		for (int c = 0; c < cells; c++)
+		{
+			int o = (i * cells + c) * cellSize;
+			if (cellSize == 4)
+				g_LumpScratch[c] = output[o >> 2];
+			else if (cellSize == 2)
+				g_LumpScratch[c] = (output[o >> 2] >>> ((o & 2) << 3)) & 0xFFFF;
+			else
+				g_LumpScratch[c] = LzmaByte(output, o);
+		}
+		list.PushArray(g_LumpScratch, cells);
+	}
+	return list;
+}
+
+int LzmaByte(const int[] data, int pos)
+{
+	return (data[pos >> 2] >>> ((pos & 3) << 3)) & 0xFF;
+}
+
+void LzmaNormalize(const int[] input)
+{
+	if ((g_LzmaRange >>> 24) == 0)
+	{
+		g_LzmaRange <<= 8;
+		g_LzmaCode = (g_LzmaCode << 8) | LzmaByte(input, g_LzmaPos++);
+	}
+}
+
+int LzmaBit(int[] probs, int index, const int[] input)
+{
+	LzmaNormalize(input);
+	int prob = probs[index];
+	int bound = (g_LzmaRange >>> 11) * prob;
+	if ((g_LzmaCode ^ 0x80000000) < (bound ^ 0x80000000))
+	{
+		g_LzmaRange = bound;
+		probs[index] = prob + ((2048 - prob) >> 5);
+		return 0;
+	}
+	g_LzmaRange -= bound;
+	g_LzmaCode -= bound;
+	probs[index] = prob - (prob >> 5);
+	return 1;
+}
+
+int LzmaTree(int[] probs, int base, int numBits, const int[] input)
+{
+	int m = 1;
+	for (int i = 0; i < numBits; i++)
+	{
+		m = (m << 1) | LzmaBit(probs, base + m, input);
+	}
+	return m - (1 << numBits);
+}
+
+int LzmaReverseTree(int[] probs, int base, int numBits, const int[] input)
+{
+	int m = 1, symbol = 0;
+	for (int i = 0; i < numBits; i++)
+	{
+		int bit = LzmaBit(probs, base + m, input);
+		m = (m << 1) | bit;
+		symbol |= bit << i;
+	}
+	return symbol;
+}
+
+int LzmaLen(int[] probs, int base, int posState, const int[] input)
+{
+	if (LzmaBit(probs, base, input) == 0)
+	{
+		return LzmaTree(probs, base + 2 + (posState << 3), 3, input);
+	}
+	if (LzmaBit(probs, base + 1, input) == 0)
+	{
+		return 8 + LzmaTree(probs, base + 130 + (posState << 3), 3, input);
+	}
+	return 16 + LzmaTree(probs, base + 258, 8, input);
+}
+
+bool LzmaDecode(const int[] input, int inLen, int props, int[] output, int outLen)
+{
+	int lc = props % 9, lp = (props / 9) % 5, pb = props / 45;
+	if (props >= 225 || lc + lp > 8)
+	{
+		return false;
+	}
+	int numProbs = 1846 + (0x300 << (lc + lp));
+	int[] probs = new int[numProbs];
+	for (int i = 0; i < numProbs; i++)
+	{
+		probs[i] = 1024;
+	}
+
+	g_LzmaPos = 0;
+	g_LzmaCode = 0;
+	g_LzmaRange = -1;
+	for (int i = 0; i < 5; i++)
+	{
+		g_LzmaCode = (g_LzmaCode << 8) | LzmaByte(input, g_LzmaPos++);
+	}
+
+	int state = 0, rep0 = 1, rep1 = 1, rep2 = 1, rep3 = 1, prev = 0, pos = 0;
+	int posMask = (1 << pb) - 1, lpMask = (1 << lp) - 1;
+	while (pos < outLen)
+	{
+		if (g_LzmaPos > inLen + 4)
+		{
+			return false;
+		}
+		int posState = pos & posMask;
+		if (LzmaBit(probs, (state << 4) + posState, input) == 0)
+		{
+			int lit = 1846 + 0x300 * (((pos & lpMask) << lc) + (prev >> (8 - lc)));
+			int symbol = 1;
+			if (state >= 7)
+			{
+				int matchByte = LzmaByte(output, pos - rep0);
+				while (symbol < 0x100)
+				{
+					int matchBit = (matchByte >> 7) & 1;
+					matchByte <<= 1;
+					int bit = LzmaBit(probs, lit + ((1 + matchBit) << 8) + symbol, input);
+					symbol = (symbol << 1) | bit;
+					if (matchBit != bit)
+					{
+						break;
+					}
+				}
+			}
+			while (symbol < 0x100)
+			{
+				symbol = (symbol << 1) | LzmaBit(probs, lit + symbol, input);
+			}
+			prev = symbol & 0xFF;
+			output[pos >> 2] |= prev << ((pos & 3) << 3);
+			pos++;
+			state = state < 4 ? 0 : (state < 10 ? state - 3 : state - 6);
+			continue;
+		}
+
+		int len;
+		if (LzmaBit(probs, 192 + state, input) == 1)
+		{
+			if (LzmaBit(probs, 204 + state, input) == 0)
+			{
+				if (LzmaBit(probs, 240 + (state << 4) + posState, input) == 0)
+				{
+					if (rep0 > pos)
+					{
+						return false;
+					}
+					state = state < 7 ? 9 : 11;
+					prev = LzmaByte(output, pos - rep0);
+					output[pos >> 2] |= prev << ((pos & 3) << 3);
+					pos++;
+					continue;
+				}
+			}
+			else
+			{
+				int distance;
+				if (LzmaBit(probs, 216 + state, input) == 0)
+				{
+					distance = rep1;
+				}
+				else
+				{
+					if (LzmaBit(probs, 228 + state, input) == 0)
+					{
+						distance = rep2;
+					}
+					else
+					{
+						distance = rep3;
+						rep3 = rep2;
+					}
+					rep2 = rep1;
+				}
+				rep1 = rep0;
+				rep0 = distance;
+			}
+			len = LzmaLen(probs, 1332, posState, input);
+			state = state < 7 ? 8 : 11;
+		}
+		else
+		{
+			rep3 = rep2;
+			rep2 = rep1;
+			rep1 = rep0;
+			state = state < 7 ? 7 : 10;
+			len = LzmaLen(probs, 818, posState, input);
+			int posSlot = LzmaTree(probs, 432 + ((len < 4 ? len : 3) << 6), 6, input);
+			if (posSlot >= 4)
+			{
+				int numDirectBits = (posSlot >> 1) - 1;
+				rep0 = 2 | (posSlot & 1);
+				if (posSlot < 14)
+				{
+					rep0 <<= numDirectBits;
+					rep0 += LzmaReverseTree(probs, 688 + rep0 - posSlot - 1, numDirectBits, input);
+				}
+				else
+				{
+					for (int i = numDirectBits - 4; i > 0; i--)
+					{
+						LzmaNormalize(input);
+						g_LzmaRange >>>= 1;
+						rep0 <<= 1;
+						if ((g_LzmaCode ^ 0x80000000) >= (g_LzmaRange ^ 0x80000000))
+						{
+							g_LzmaCode -= g_LzmaRange;
+							rep0 |= 1;
+						}
+					}
+					rep0 <<= 4;
+					rep0 += LzmaReverseTree(probs, 802, 4, input);
+				}
+			}
+			else
+			{
+				rep0 = posSlot;
+			}
+			rep0++;
+		}
+
+		len += 2;
+		if (rep0 > pos)
+		{
+			return false;
+		}
+		while (len-- > 0 && pos < outLen)
+		{
+			prev = LzmaByte(output, pos - rep0);
+			output[pos >> 2] |= prev << ((pos & 3) << 3);
+			pos++;
+		}
+	}
+	return true;
 }
 
 void AddTriggerBodies(ArrayList bodies)

@@ -6,6 +6,7 @@ This plugin is a [Show Triggers](https://github.com/blankbhop/improved-showtrigg
 
 - The plugin shows `trigger_multiple`, `trigger_push`, `trigger_teleport` and `trigger_teleport_relative` brushes for each player. It removes `EF_NODRAW` from the brush and filters the brush for each player in a `SDKHook_SetTransmit` hook.
 - The plugin colors each trigger by its type. Push triggers are green. Teleports are red. A `trigger_multiple` is orange for `gravity 40` outputs, teal for `gravity -` outputs, and green for `basevelocity` outputs. The plugin reads the outputs from the entity lump of the map with the SourceMod `EntityLump` natives. It matches each output to an entity by `hammerid`.
+- The plugin reads the map file itself. Maps with LZMA compressed lumps work. The plugin decodes the compressed lumps in SourcePawn on map start. This takes a fraction of a second for the lumps it needs.
 - Triggers with only `nodraw` textures have no faces in the BSP. The engine cannot draw them. For these triggers the plugin reads the brush planes from the map file and builds the polygons again. On map start it writes a studio model to `models/showbrushes/<map>_<hash>.mdl`, `.vvd` and `.dx90.vtx`. It then spawns one `prop_dynamic_override` for each trigger. The prop shows the mesh of the trigger with the same `SetTransmit` rules and colors as a brush.
 - The plugin shows the clip brushes of the world in the same way. It reads the world brushes and the brushes of solid `func_brush` and `func_wall` entities from the map file and sorts them into six types: player clip, NPC clip, clip for both, invisible, nodraw, and ladder. The type comes from the brush contents and from the tool material of each side. A `func_brush` or `func_wall` with `rendermode 10` or `renderamt 0` counts as invisible with any texture. The plugin writes the clip brushes to `models/showbrushes/<map>_<hash>_clips<n>.mdl`. Each model holds one body for each type and one body for each brush. A large map gets more than one clip model. The plugin spawns one prop for each type. It spawns a prop for a single brush only while a player aims at it or has it in a selection.
 - Each clip type shows the tool texture of Hammer. The materials are `materials/showbrushes/playerclip.vmt`, `npcclip.vmt`, `clip.vmt`, `invisible.vmt` and `nodraw.vmt`. They use the `tools/tools*` textures that ship with the game. The ladder type uses `ladder.vmt` with the invisible ladder texture.
@@ -49,7 +50,6 @@ This plugin is a [Show Triggers](https://github.com/blankbhop/improved-showtrigg
   }
   ```
 - Clients must keep `sv_allowupload` at its default value of 1. Otherwise the engine discards the transferred files.
-- Maps with LZMA compressed lumps are not supported. The plugin does not build models for them.
 
 ## Forced server settings
 
