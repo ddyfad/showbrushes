@@ -82,9 +82,25 @@ enum struct Clip
 	int file;
 	int body;
 	int prop;
+	int edgeStart;
+	int edgeCount;
 	float mins[3];
 	float maxs[3];
 }
+
+#define BEAM_PASS_INTERVAL 2.0
+#define BEAM_LIFETIME      2.6
+#define BEAM_BUDGET        480
+#define BEAMS_PER_FRAME    200
+
+static const int g_CLIP_COLORS[][3] =
+{
+	{255, 40, 40},
+	{255, 240, 0},
+	{175, 60, 235},
+	{255, 140, 0},
+	{0, 230, 255}
+};
 
 // Which brush types does the player have enabled?
 bool g_bTypeEnabled[MAXPLAYERS+1][MAX_TYPES];
@@ -134,6 +150,11 @@ char g_sModelPath[PLATFORM_MAX_PATH];
 
 ArrayList g_Clips;
 ArrayList g_ClipPlanes;
+ArrayList g_ClipEdges;
+bool g_bClipBeams[MAXPLAYERS+1];
+ArrayList g_BeamQueue[MAXPLAYERS+1];
+float g_fNextBeamPass[MAXPLAYERS+1];
+int g_iBeamSprite;
 ArrayList g_ClipFiles;
 StringMap g_ClipByBrush;
 
@@ -255,6 +276,7 @@ public void OnPluginStart()
 
 	g_TriggerMenu = BuildTypeMenu("Triggers", g_NAMES, MAX_TYPES);
 	g_ClipMenu = BuildTypeMenu("Clips", g_CLIP_NAMES, MAX_CLIP_TYPES);
+	g_ClipMenu.InsertItem(0, "style", "Style");
 
 	Menu selection = new Menu(menuHandler_Selection, MenuAction_DrawItem|MenuAction_DisplayItem);
 	selection.SetTitle("Selection");
@@ -278,6 +300,7 @@ public void OnPluginStart()
 	g_ClipByBrush = new StringMap();
 	g_Clips = new ArrayList(sizeof Clip);
 	g_ClipPlanes = new ArrayList(4);
+	g_ClipEdges = new ArrayList(6);
 	g_ClipFiles = new ArrayList(ByteCountToCells(PLATFORM_MAX_PATH));
 	g_PushFiles = new ArrayList(ByteCountToCells(PLATFORM_MAX_PATH));
 	g_PushSizes = new ArrayList();
@@ -290,6 +313,7 @@ public void OnPluginStart()
 	{
 		g_SelectedTriggers[i] = new ArrayList();
 		g_SelectedClips[i] = new ArrayList();
+		g_BeamQueue[i] = new ArrayList(7);
 		g_iHighlightedTrigger[i] = -1;
 		g_iHighlightedClip[i] = -1;
 	}
@@ -299,6 +323,7 @@ public void OnPluginStart()
 
 	// Update aim targets for players in selection mode
 	CreateTimer(0.1, Timer_UpdateAimTargets, _, TIMER_REPEAT);
+	CreateTimer(0.1, Timer_BeamPass, _, TIMER_REPEAT);
 }
 
 Menu BuildTypeMenu(const char[] title, const char[][] names, int count)
@@ -347,6 +372,12 @@ public void OnMapStart()
 		g_iClipPropType[i] = -1;
 		g_iClipPropClip[i] = -1;
 	}
+	for (int i = 1; i <= MaxClients; i++)
+	{
+		g_BeamQueue[i].Clear();
+		g_fNextBeamPass[i] = 0.0;
+	}
+	g_iBeamSprite = PrecacheModel("materials/sprites/laserbeam.vmt", true);
 	BuildMapModels();
 
 	// Cache all triggers when the map starts
@@ -489,6 +520,9 @@ public void OnClientConnected(int client)
 	// Initialize client data
 	g_bUseSelectionMode[client] = false;
 	g_bSelectMode[client] = false;
+	g_bClipBeams[client] = false;
+	g_BeamQueue[client].Clear();
+	g_fNextBeamPass[client] = 0.0;
 	g_iHighlightedTrigger[client] = -1;
 	g_iHighlightedClip[client] = -1;
 
@@ -590,11 +624,12 @@ public Action Timer_UpdateAimTargets(Handle timer)
 		if (g_iHighlightedClip[client] != aimClip)
 		{
 			g_iHighlightedClip[client] = aimClip;
-			if (aimClip != -1)
+			if (aimClip != -1 && !g_bClipBeams[client])
 			{
 				EnsureClipProp(aimClip);
 			}
 			PruneClipProps();
+			RefreshBeams(client);
 		}
 	}
 
@@ -789,6 +824,7 @@ public Action cmdClearSelection(int client, int args)
 	g_SelectedTriggers[client].Clear();
 	g_SelectedClips[client].Clear();
 	PruneClipProps();
+	RefreshBeams(client);
 
 	PrintToChat(client, "%sSelection cleared. %s%d%s brushes removed.", WHITE, GOLD, count, WHITE);
 
@@ -867,10 +903,14 @@ void PickClip(int client, int clip)
 	g_Clips.GetArray(clip, c);
 
 	int index = g_SelectedClips[client].FindValue(clip);
+	RefreshBeams(client);
 	if (index == -1)
 	{
 		g_SelectedClips[client].Push(clip);
-		EnsureClipProp(clip);
+		if (!g_bClipBeams[client])
+		{
+			EnsureClipProp(clip);
+		}
 		PrintToChat(client, "%s%sAdded%s %s%s%s to selection (%s%d%s total)",
 			WHITE, GREEN, WHITE,
 			GOLD, g_CLIP_NAMES[c.type], WHITE,
@@ -928,6 +968,7 @@ public Action cmdShowClips(int client, int args)
 		return Plugin_Handled;
 	}
 
+	RefreshBeams(client);
 	if (!g_bClipEnabled[client][CLIP_PLAYER])
 	{
 		g_bClipEnabled[client][CLIP_PLAYER] = true;
@@ -953,6 +994,7 @@ bool ToggleSelectionDisplay(int client)
 		return false;
 	}
 
+	RefreshBeams(client);
 	if (!AnyTypeEnabled(client))
 	{
 		// Enable all types so the selected triggers are shown
@@ -977,6 +1019,7 @@ public Action cmdToggleSelectMode(int client, int args)
 		return Plugin_Handled;
 
 	g_bSelectMode[client] = !g_bSelectMode[client];
+	RefreshBeams(client);
 
 	if (g_bSelectMode[client])
 	{
@@ -1035,6 +1078,7 @@ public Action cmdConfirmSelection(int client, int args)
 	g_bSelectMode[client] = false;
 	g_iHighlightedClip[client] = -1;
 	PruneClipProps();
+	RefreshBeams(client);
 
 	// Enable all trigger types for the selected triggers
 	SetAllTypes(client, true);
@@ -1074,6 +1118,7 @@ public Action cmdResetSelection(int client, int args)
 	g_bSelectMode[client] = false;
 	g_iHighlightedClip[client] = -1;
 	PruneClipProps();
+	RefreshBeams(client);
 
 	// Disable all trigger types
 	SetAllTypes(client, false);
@@ -1144,6 +1189,14 @@ public int menuHandler_Types(Menu menu, MenuAction action, int param1, int param
 			char info[8];
 			menu.GetItem(param2, info, sizeof info);
 
+			if (StrEqual(info, "style"))
+			{
+				g_bClipBeams[param1] = !g_bClipBeams[param1];
+				RefreshBeams(param1);
+				menu.DisplayAt(param1, menu.Selection, MENU_TIME_FOREVER);
+				return 0;
+			}
+
 			int type = StringToInt(info);
 			switch (type)
 			{
@@ -1171,6 +1224,7 @@ public int menuHandler_Types(Menu menu, MenuAction action, int param1, int param
 			}
 
 			CheckBrushes(ShouldRender());
+			RefreshBeams(param1);
 
 			menu.DisplayAt(param1, menu.Selection, MENU_TIME_FOREVER);
 		}
@@ -1215,6 +1269,12 @@ public int menuHandler_Types(Menu menu, MenuAction action, int param1, int param
 			char info[8];
 			char text[64];
 			menu.GetItem(param2, info, sizeof info, _, text, sizeof text);
+
+			if (StrEqual(info, "style"))
+			{
+				Format(text, sizeof text, "Style: [%s]", g_bClipBeams[param1] ? "Beams" : "Textures");
+				return RedrawMenuItem(text);
+			}
 
 			int type = StringToInt(info);
 			if (type >= 0)
@@ -1350,6 +1410,7 @@ public void OnClientDisconnect(int client)
 	{
 		g_SelectedClips[client].Clear();
 	}
+	g_BeamQueue[client].Clear();
 	PruneClipProps();
 
 	CheckBrushes(ShouldRender());
@@ -1686,7 +1747,7 @@ public Action hookST_triggerTeleportRelative(int entity, int client)
 
 public Action hookST_ClipType(int entity, int client)
 {
-	if (!g_bClipEnabled[client][g_iClipPropType[entity]])
+	if (!g_bClipEnabled[client][g_iClipPropType[entity]] || g_bClipBeams[client])
 		return Plugin_Handled;
 	if (!g_bClientHasModel[client])
 	{
@@ -1703,7 +1764,7 @@ public Action hookST_Clip(int entity, int client)
 	int clip = g_iClipPropClip[entity];
 	Clip c;
 	g_Clips.GetArray(clip, c);
-	if (!g_bClipEnabled[client][c.type])
+	if (!g_bClipEnabled[client][c.type] || g_bClipBeams[client])
 		return Plugin_Handled;
 	if (!g_bClientHasModel[client])
 	{
@@ -1777,6 +1838,7 @@ void BuildMapModels()
 	g_sModelBase[0] = '\0';
 	g_Clips.Clear();
 	g_ClipPlanes.Clear();
+	g_ClipEdges.Clear();
 	g_ClipFiles.Clear();
 	g_ClipByBrush.Clear();
 	g_PushFiles.Clear();
@@ -2142,6 +2204,7 @@ void AddClipBrushes()
 		c.file = -1;
 		c.body = -1;
 		c.prop = -1;
+		c.edgeStart = g_ClipEdges.Length;
 		for (int k = 0; k < 3; k++)
 		{
 			c.mins[k] = 1.0e30;
@@ -2166,11 +2229,212 @@ void AddClipBrushes()
 				}
 			}
 		}
+		AddClipEdges(c);
+		c.edgeCount = g_ClipEdges.Length - c.edgeStart;
 
 		g_Clips.PushArray(c);
 	}
 	delete brushes;
 	PrintToServer("%d clip brushes on the map", g_Clips.Length);
+}
+
+void AddClipEdges(const Clip c)
+{
+	float center[3], a[3], b[3], oa[3], ob[3], edge[6], other[6];
+	for (int k = 0; k < 3; k++)
+	{
+		center[k] = (c.mins[k] + c.maxs[k]) * 0.5;
+	}
+	float inset = c.type == CLIP_INVISIBLE || c.type == CLIP_NODRAW ? 0.5 : 0.1;
+
+	int range[2];
+	for (int p = c.firstPoly; p < c.firstPoly + c.numPolys; p++)
+	{
+		g_Polys.GetArray(p, range);
+		for (int v = 0; v < range[1]; v++)
+		{
+			g_PolyVerts.GetArray(range[0] + v, a);
+			g_PolyVerts.GetArray(range[0] + (v + 1) % range[1], b);
+			if (GetVectorDistance(a, b) < 1.0)
+			{
+				continue;
+			}
+
+			bool known = false;
+			for (int e = c.edgeStart; e < g_ClipEdges.Length && !known; e++)
+			{
+				g_ClipEdges.GetArray(e, other);
+				for (int k = 0; k < 3; k++)
+				{
+					oa[k] = other[k];
+					ob[k] = other[3 + k];
+				}
+				known = (GetVectorDistance(a, oa) < 0.5 && GetVectorDistance(b, ob) < 0.5)
+					|| (GetVectorDistance(a, ob) < 0.5 && GetVectorDistance(b, oa) < 0.5);
+			}
+			if (known)
+			{
+				continue;
+			}
+			InsetPoint(a, center, inset);
+			InsetPoint(b, center, inset);
+			for (int k = 0; k < 3; k++)
+			{
+				edge[k] = a[k];
+				edge[3 + k] = b[k];
+			}
+			g_ClipEdges.PushArray(edge);
+		}
+	}
+}
+
+void InsetPoint(float point[3], const float center[3], float amount)
+{
+	float toCenter[3];
+	SubtractVectors(center, point, toCenter);
+	float length = GetVectorLength(toCenter);
+	if (length > 0.01)
+	{
+		ScaleVector(toCenter, amount / length);
+		AddVectors(point, toCenter, point);
+	}
+}
+
+void RefreshBeams(int client)
+{
+	g_fNextBeamPass[client] = 0.0;
+}
+
+public Action Timer_BeamPass(Handle timer)
+{
+	for (int client = 1; client <= MaxClients; client++)
+	{
+		if (!IsClientInGame(client) || IsFakeClient(client) || !g_bClipBeams[client] || GetGameTime() < g_fNextBeamPass[client])
+		{
+			continue;
+		}
+		g_fNextBeamPass[client] = GetGameTime() + BEAM_PASS_INTERVAL;
+		BuildBeamPass(client);
+	}
+	return Plugin_Continue;
+}
+
+void BuildBeamPass(int client)
+{
+	g_BeamQueue[client].Clear();
+	if (g_Clips.Length == 0)
+	{
+		return;
+	}
+
+	float eye[3], center[3];
+	GetClientEyePosition(client, eye);
+	ArrayList order = new ArrayList(2);
+	Clip c;
+	for (int i = 0; i < g_Clips.Length; i++)
+	{
+		g_Clips.GetArray(i, c);
+		if (!g_bClipEnabled[client][c.type])
+		{
+			continue;
+		}
+		bool selected = g_SelectedClips[client].FindValue(i) != -1;
+		if (g_bUseSelectionMode[client] && !selected && !(g_bSelectMode[client] && g_iHighlightedClip[client] == i))
+		{
+			continue;
+		}
+		for (int k = 0; k < 3; k++)
+		{
+			center[k] = (c.mins[k] + c.maxs[k]) * 0.5;
+		}
+		int entry[2];
+		entry[0] = view_as<int>(GetVectorDistance(eye, center));
+		entry[1] = i;
+		order.PushArray(entry);
+	}
+	order.SortCustom(SortByDistance);
+
+	int budget = BEAM_BUDGET;
+	float edge[6];
+	int item[7];
+	for (int n = 0; n < order.Length && budget > 0; n++)
+	{
+		int i = order.Get(n, 1);
+		g_Clips.GetArray(i, c);
+		int color = 0;
+		if (g_bSelectMode[client] && g_SelectedClips[client].FindValue(i) != -1)
+		{
+			color = 0xFFFF00;
+		}
+		else if (g_bSelectMode[client] && g_iHighlightedClip[client] == i)
+		{
+			color = 0x00FFFF;
+		}
+		else
+		{
+			color = (g_CLIP_COLORS[c.type][0] << 16) | (g_CLIP_COLORS[c.type][1] << 8) | g_CLIP_COLORS[c.type][2];
+		}
+		for (int e = 0; e < c.edgeCount && budget > 0; e++, budget--)
+		{
+			g_ClipEdges.GetArray(c.edgeStart + e, edge);
+			for (int k = 0; k < 6; k++)
+			{
+				item[k] = view_as<int>(edge[k]);
+			}
+			item[6] = color;
+			g_BeamQueue[client].PushArray(item);
+		}
+	}
+	delete order;
+	if (g_BeamQueue[client].Length > 0)
+	{
+		RequestFrame(DrainBeams, GetClientUserId(client));
+	}
+}
+
+public int SortByDistance(int index1, int index2, Handle array, Handle hndl)
+{
+	ArrayList list = view_as<ArrayList>(array);
+	float a = view_as<float>(list.Get(index1, 0));
+	float b = view_as<float>(list.Get(index2, 0));
+	return a < b ? -1 : (a > b ? 1 : 0);
+}
+
+public void DrainBeams(int userId)
+{
+	int client = GetClientOfUserId(userId);
+	if (client == 0 || !IsClientInGame(client))
+	{
+		return;
+	}
+
+	ArrayList queue = g_BeamQueue[client];
+	int count = queue.Length < BEAMS_PER_FRAME ? queue.Length : BEAMS_PER_FRAME;
+	int item[7], color[4];
+	float start[3], end[3];
+	color[3] = 255;
+	for (int i = 0; i < count; i++)
+	{
+		queue.GetArray(i, item);
+		for (int k = 0; k < 3; k++)
+		{
+			start[k] = view_as<float>(item[k]);
+			end[k] = view_as<float>(item[3 + k]);
+		}
+		color[0] = (item[6] >> 16) & 0xFF;
+		color[1] = (item[6] >> 8) & 0xFF;
+		color[2] = item[6] & 0xFF;
+		TE_SetupBeamPoints(start, end, g_iBeamSprite, 0, 0, 0, BEAM_LIFETIME, 1.5, 1.5, 0, 0.0, color, 0);
+		TE_SendToClient(client);
+	}
+	for (int i = 0; i < count; i++)
+	{
+		queue.Erase(0);
+	}
+	if (queue.Length > 0)
+	{
+		RequestFrame(DrainBeams, userId);
+	}
 }
 
 int ClassifyBrush(int b, int[] texKind)
