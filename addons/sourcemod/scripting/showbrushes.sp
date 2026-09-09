@@ -1071,6 +1071,7 @@ public Action cmdShowTriggers(int client, int args)
 	{
 		g_bTypeEnabled[client][TRIGGER_TELEPORT] = true;
 		CheckBrushes(ShouldRender());
+		RequestModels(client);
 		PrintToChat(client, "%sShowtriggers toggled: %sON", WHITE, GREEN);
 
 		PrintToChat(client, "%sConsider using %s!sbsettings%s or %s!select%s for more options.",
@@ -1101,6 +1102,7 @@ public Action cmdShowClips(int client, int args)
 	{
 		g_bClipEnabled[client][CLIP_PLAYER] = true;
 		CheckBrushes(ShouldRender());
+		RequestModels(client);
 		PrintToChat(client, "%sShowclips toggled: %sON", WHITE, GREEN);
 		PrintToChat(client, "%sConsider using %s!sbsettings%s or %s!select%s for more options.",
 			WHITE, GREEN, WHITE, GREEN, WHITE);
@@ -1339,6 +1341,7 @@ public int menuHandler_Types(Menu menu, MenuAction action, int param1, int param
 			{
 				g_bClipBeams[param1] = !g_bClipBeams[param1];
 				RefreshBeams(param1);
+				RequestModels(param1);
 				menu.DisplayAt(param1, menu.Selection, MENU_TIME_FOREVER);
 				return 0;
 			}
@@ -1371,6 +1374,7 @@ public int menuHandler_Types(Menu menu, MenuAction action, int param1, int param
 
 			CheckBrushes(ShouldRender());
 			RefreshBeams(param1);
+			RequestModels(param1);
 
 			menu.DisplayAt(param1, menu.Selection, MENU_TIME_FOREVER);
 		}
@@ -3589,6 +3593,23 @@ int ClientOfHandler(Address handler)
 		}
 	}
 	return 0;
+}
+
+void RequestModels(int client)
+{
+	bool wanted = false;
+	for (int i = 0; i < MAX_TYPES; i++)
+	{
+		wanted = wanted || g_bTypeEnabled[client][i];
+	}
+	for (int i = 0; i < MAX_CLIP_TYPES && !g_bClipBeams[client]; i++)
+	{
+		wanted = wanted || g_bClipEnabled[client][i];
+	}
+	if (wanted && !g_bClientHasModel[client])
+	{
+		EnsureClientModel(client);
+	}
 }
 
 void EnsureClientModel(int client)
