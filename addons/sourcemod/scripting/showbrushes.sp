@@ -2312,22 +2312,64 @@ void AddClipBrushes()
 		return;
 	}
 
+	ArrayList models = g_Lumps[LUMP_MODELS];
 	int model[12];
-	g_Lumps[LUMP_MODELS].GetArray(0, model, sizeof model);
-	ArrayList brushes = CollectModelBrushes(model[9]);
 	int[] texKind = new int[g_Lumps[LUMP_TEXDATA].Length];
 	for (int i = 0; i < g_Lumps[LUMP_TEXDATA].Length; i++)
 	{
 		texKind[i] = -2;
 	}
 
+	float origin[3];
+	models.GetArray(0, model, sizeof model);
+	AddModelClips(model[9], origin, texKind, false);
+
+	char buffer[64], parts[3][16];
+	int length = EntityLump.Length();
+	for (int i = 0; i < length; i++)
+	{
+		EntityLumpEntry ent = EntityLump.Get(i);
+		ent.GetNextKey("classname", buffer, sizeof buffer);
+		bool solid = StrEqual(buffer, "func_wall");
+		if (StrEqual(buffer, "func_brush"))
+		{
+			solid = ent.GetNextKey("Solidity", buffer, sizeof buffer) == -1 || buffer[0] != '1';
+		}
+		bool hidden = ent.GetNextKey("rendermode", buffer, sizeof buffer) != -1 && StringToInt(buffer) == 10;
+		hidden = hidden || (ent.GetNextKey("renderamt", buffer, sizeof buffer) != -1 && StringToInt(buffer) == 0);
+		buffer[0] = '\0';
+		ent.GetNextKey("model", buffer, sizeof buffer);
+		int modelIndex = solid && buffer[0] == '*' ? StringToInt(buffer[1]) : 0;
+		origin[0] = origin[1] = origin[2] = 0.0;
+		if (ent.GetNextKey("origin", buffer, sizeof buffer) != -1 && ExplodeString(buffer, " ", parts, 3, sizeof parts[]) == 3)
+		{
+			for (int k = 0; k < 3; k++)
+			{
+				origin[k] = StringToFloat(parts[k]);
+			}
+		}
+		delete ent;
+
+		if (modelIndex <= 0 || modelIndex >= models.Length)
+		{
+			continue;
+		}
+		models.GetArray(modelIndex, model, sizeof model);
+		AddModelClips(model[9], origin, texKind, hidden);
+	}
+	PrintToServer("%d clip brushes on the map", g_Clips.Length);
+}
+
+void AddModelClips(int headnode, const float origin[3], int[] texKind, bool hiddenEntity)
+{
+	ArrayList brushes = CollectModelBrushes(headnode);
 	int planeNums[MAX_BRUSH_SIDES];
 	float plane[4], point[3];
 	Clip c;
 	for (int i = 0; i < brushes.Length; i++)
 	{
 		int b = brushes.Get(i);
-		int type = ClassifyBrush(b, texKind);
+		int type = ClassifyBrush(b, texKind, hiddenEntity);
 		if (type == -1)
 		{
 			continue;
@@ -2339,6 +2381,7 @@ void AddClipBrushes()
 		}
 
 		int firstPoly = g_Polys.Length;
+		int firstVert = g_PolyVerts.Length;
 		AddBrushFaces(planeNums, planeCount);
 		if (g_Polys.Length == firstPoly)
 		{
@@ -2363,21 +2406,19 @@ void AddClipBrushes()
 		for (int p = 0; p < planeCount; p++)
 		{
 			g_Lumps[LUMP_PLANES].GetArray(planeNums[p], plane, 4);
+			plane[3] += plane[0] * origin[0] + plane[1] * origin[1] + plane[2] * origin[2];
 			g_ClipPlanes.PushArray(plane);
 		}
-		int range[2];
-		for (int p = firstPoly; p < g_Polys.Length; p++)
+		for (int v = firstVert; v < g_PolyVerts.Length; v++)
 		{
-			g_Polys.GetArray(p, range);
-			for (int v = range[0]; v < range[0] + range[1]; v++)
+			g_PolyVerts.GetArray(v, point);
+			for (int k = 0; k < 3; k++)
 			{
-				g_PolyVerts.GetArray(v, point);
-				for (int k = 0; k < 3; k++)
-				{
-					if (point[k] < c.mins[k]) c.mins[k] = point[k];
-					if (point[k] > c.maxs[k]) c.maxs[k] = point[k];
-				}
+				point[k] += origin[k];
+				if (point[k] < c.mins[k]) c.mins[k] = point[k];
+				if (point[k] > c.maxs[k]) c.maxs[k] = point[k];
 			}
+			g_PolyVerts.SetArray(v, point);
 		}
 		AddClipEdges(c);
 		c.edgeCount = g_ClipEdges.Length - c.edgeStart;
@@ -2385,7 +2426,6 @@ void AddClipBrushes()
 		g_Clips.PushArray(c);
 	}
 	delete brushes;
-	PrintToServer("%d clip brushes on the map", g_Clips.Length);
 }
 
 void AddClipEdges(const Clip c)
@@ -2587,7 +2627,7 @@ public void DrainBeams(int userId)
 	}
 }
 
-int ClassifyBrush(int b, int[] texKind)
+int ClassifyBrush(int b, int[] texKind, bool hiddenEntity = false)
 {
 	ArrayList sides = g_Lumps[LUMP_BRUSHSIDES];
 	ArrayList texInfo = g_Lumps[LUMP_TEXINFO];
@@ -2613,6 +2653,9 @@ int ClassifyBrush(int b, int[] texKind)
 		return CLIP_PLAYER;
 	if (npcClip)
 		return CLIP_NPC;
+
+	if (hiddenEntity)
+		return CLIP_INVISIBLE;
 
 	int realSides = 0, invisibleSides = 0;
 	for (int s = brush[0]; s < brush[0] + brush[1]; s++)
