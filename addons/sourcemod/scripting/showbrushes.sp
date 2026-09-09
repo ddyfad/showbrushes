@@ -6,6 +6,7 @@
 #include <sdktools>
 #include <entitylump>
 #include <dhooks>
+#include <clientprefs>
 
 #pragma dynamic 2097152
 
@@ -158,6 +159,14 @@ ArrayList g_Clips;
 ArrayList g_ClipPlanes;
 ArrayList g_ClipEdges;
 bool g_bClipBeams[MAXPLAYERS+1];
+int g_iBeamWidth[MAXPLAYERS+1] = {1, ...};
+int g_iTriggerAlpha[MAXPLAYERS+1] = {3, ...};
+int g_iClipAlpha[MAXPLAYERS+1] = {3, ...};
+bool g_bSettingsApplied[MAXPLAYERS+1];
+Cookie g_Cookie;
+static const float g_BEAM_WIDTHS[] = {0.5, 1.5, 3.0};
+static const char g_BEAM_WIDTH_NAMES[][] = {"Thin", "Normal", "Thick"};
+static const int g_ALPHAS[] = {64, 128, 192, 255};
 ArrayList g_BeamQueue[MAXPLAYERS+1];
 float g_fNextBeamPass[MAXPLAYERS+1];
 int g_iBeamSprite;
@@ -260,6 +269,7 @@ public void OnPluginStart()
 	g_Delivered = new KeyValues("Delivered");
 	g_Delivered.ImportFromFile(g_sDeliveredPath);
 
+	g_Cookie = new Cookie("sb_settings", "showbrushes menu settings", CookieAccess_Private);
 	CreateConVar("sm_showbrushes_version", PLUGIN_VERSION, PLUGIN_DESCRIPTION, FCVAR_SPONLY|FCVAR_NOTIFY|FCVAR_DONTRECORD).SetString(PLUGIN_VERSION);
 
 	RegConsoleCmd("sm_showbrushessettings", cmdShowTriggersSettings, "Toggle brush settings menu");
@@ -285,11 +295,15 @@ public void OnPluginStart()
 	menu.AddItem("triggers", "Triggers");
 	menu.AddItem("clips", "Clips");
 	menu.AddItem("selection", "Selection");
+	menu.AddItem("help", "Help");
 	g_Menu = menu;
 
 	g_TriggerMenu = BuildTypeMenu("Triggers", g_NAMES, MAX_TYPES);
 	g_ClipMenu = BuildTypeMenu("Clips", g_CLIP_NAMES, MAX_CLIP_TYPES);
+	g_TriggerMenu.InsertItem(0, "opacity", "Opacity");
 	g_ClipMenu.InsertItem(0, "style", "Style");
+	g_ClipMenu.InsertItem(1, "width", "Beam width");
+	g_ClipMenu.InsertItem(2, "opacity", "Opacity");
 
 	Menu selection = new Menu(menuHandler_Selection, MenuAction_DrawItem|MenuAction_DisplayItem);
 	selection.SetTitle("Selection");
@@ -647,6 +661,68 @@ public void OnClientPostAdminCheck(int client)
 	{
 		g_bRestorePending[client] = true;
 	}
+	ApplySettings(client);
+}
+
+public void OnClientCookiesCached(int client)
+{
+	if (IsClientInGame(client))
+	{
+		ApplySettings(client);
+	}
+}
+
+void ApplySettings(int client)
+{
+	if (g_bSettingsApplied[client] || IsFakeClient(client) || !AreClientCookiesCached(client))
+	{
+		return;
+	}
+	g_bSettingsApplied[client] = true;
+
+	char value[64], parts[6][8];
+	g_Cookie.Get(client, value, sizeof value);
+	if (ExplodeString(value, " ", parts, sizeof parts, sizeof parts[]) < 6)
+	{
+		return;
+	}
+	int triggers = StringToInt(parts[0]), clips = StringToInt(parts[1]);
+	for (int i = 0; i < MAX_TYPES; i++)
+	{
+		g_bTypeEnabled[client][i] = ((triggers >> i) & 1) != 0;
+	}
+	for (int i = 0; i < MAX_CLIP_TYPES; i++)
+	{
+		g_bClipEnabled[client][i] = ((clips >> i) & 1) != 0;
+	}
+	g_bClipBeams[client] = StringToInt(parts[2]) != 0;
+	g_iBeamWidth[client] = StringToInt(parts[3]) % sizeof g_BEAM_WIDTHS;
+	g_iTriggerAlpha[client] = StringToInt(parts[4]) % sizeof g_ALPHAS;
+	g_iClipAlpha[client] = StringToInt(parts[5]) % sizeof g_ALPHAS;
+
+	CheckBrushes(ShouldRender());
+	RefreshBeams(client);
+	RequestModels(client);
+}
+
+void SaveSettings(int client)
+{
+	if (IsFakeClient(client) || !AreClientCookiesCached(client))
+	{
+		return;
+	}
+	int triggers, clips;
+	for (int i = 0; i < MAX_TYPES; i++)
+	{
+		triggers |= (g_bTypeEnabled[client][i] ? 1 : 0) << i;
+	}
+	for (int i = 0; i < MAX_CLIP_TYPES; i++)
+	{
+		clips |= (g_bClipEnabled[client][i] ? 1 : 0) << i;
+	}
+	char value[64];
+	Format(value, sizeof value, "%d %d %d %d %d %d", triggers, clips, g_bClipBeams[client], g_iBeamWidth[client], g_iTriggerAlpha[client], g_iClipAlpha[client]);
+	g_Cookie.Set(client, value);
 }
 
 public void OnClientConnected(int client)
@@ -655,6 +731,10 @@ public void OnClientConnected(int client)
 	g_bUseSelectionMode[client] = false;
 	g_bSelectMode[client] = false;
 	g_bClipBeams[client] = false;
+	g_iBeamWidth[client] = 1;
+	g_iTriggerAlpha[client] = sizeof g_ALPHAS - 1;
+	g_iClipAlpha[client] = sizeof g_ALPHAS - 1;
+	g_bSettingsApplied[client] = false;
 	g_BeamQueue[client].Clear();
 	g_fNextBeamPass[client] = 0.0;
 	g_iHighlightedTrigger[client] = -1;
@@ -1090,6 +1170,7 @@ public Action cmdShowTriggers(int client, int args)
 		PrintToChat(client, "%sShowtriggers toggled: %sOFF", WHITE, RED);
 	}
 
+	SaveSettings(client);
 	return Plugin_Handled;
 }
 
@@ -1120,6 +1201,7 @@ public Action cmdShowClips(int client, int args)
 		PrintToChat(client, "%sShowclips toggled: %sOFF", WHITE, RED);
 	}
 
+	SaveSettings(client);
 	return Plugin_Handled;
 }
 
@@ -1195,6 +1277,7 @@ public Action cmdToggleSelectMode(int client, int args)
 		PrintToChat(client, "%sSelection mode: %sOFF", WHITE, RED);
 	}
 
+	SaveSettings(client);
 	return Plugin_Handled;
 }
 
@@ -1239,6 +1322,7 @@ public Action cmdConfirmSelection(int client, int args)
 
 	PrintToChat(client, "%sUse %s!reset%s to reset your selection.", WHITE, GREEN, WHITE);
 
+	SaveSettings(client);
 	return Plugin_Handled;
 }
 
@@ -1265,6 +1349,7 @@ public Action cmdResetSelection(int client, int args)
 	PrintToChat(client, "%sSelection reset. Use %s!st%s or %s!sbs%s to show triggers normally.",
 		WHITE, GREEN, WHITE, GREEN, WHITE);
 
+	SaveSettings(client);
 	return Plugin_Handled;
 }
 
@@ -1310,8 +1395,13 @@ public int menuHandler_Main(Menu menu, MenuAction action, int param1, int param2
 			g_TriggerMenu.Display(param1, MENU_TIME_FOREVER);
 		else if (StrEqual(info, "clips"))
 			g_ClipMenu.Display(param1, MENU_TIME_FOREVER);
-		else
+		else if (StrEqual(info, "selection"))
 			g_SelectionMenu.Display(param1, MENU_TIME_FOREVER);
+		else
+		{
+			cmdShowTriggersHelp(param1, 0);
+			menu.DisplayAt(param1, menu.Selection, MENU_TIME_FOREVER);
+		}
 	}
 	return 0;
 }
@@ -1348,6 +1438,25 @@ public int menuHandler_Types(Menu menu, MenuAction action, int param1, int param
 				g_bClipBeams[param1] = !g_bClipBeams[param1];
 				RefreshBeams(param1);
 				RequestModels(param1);
+				SaveSettings(param1);
+				menu.DisplayAt(param1, menu.Selection, MENU_TIME_FOREVER);
+				return 0;
+			}
+			if (StrEqual(info, "width"))
+			{
+				g_iBeamWidth[param1] = (g_iBeamWidth[param1] + 1) % sizeof g_BEAM_WIDTHS;
+				RefreshBeams(param1);
+				SaveSettings(param1);
+				menu.DisplayAt(param1, menu.Selection, MENU_TIME_FOREVER);
+				return 0;
+			}
+			if (StrEqual(info, "opacity"))
+			{
+				if (menu == g_ClipMenu)
+					g_iClipAlpha[param1] = (g_iClipAlpha[param1] + 1) % sizeof g_ALPHAS;
+				else
+					g_iTriggerAlpha[param1] = (g_iTriggerAlpha[param1] + 1) % sizeof g_ALPHAS;
+				SaveSettings(param1);
 				menu.DisplayAt(param1, menu.Selection, MENU_TIME_FOREVER);
 				return 0;
 			}
@@ -1381,6 +1490,7 @@ public int menuHandler_Types(Menu menu, MenuAction action, int param1, int param
 			CheckBrushes(ShouldRender());
 			RefreshBeams(param1);
 			RequestModels(param1);
+			SaveSettings(param1);
 
 			menu.DisplayAt(param1, menu.Selection, MENU_TIME_FOREVER);
 		}
@@ -1429,6 +1539,17 @@ public int menuHandler_Types(Menu menu, MenuAction action, int param1, int param
 			if (StrEqual(info, "style"))
 			{
 				Format(text, sizeof text, "Style: [%s]", g_bClipBeams[param1] ? "Beams" : "Textures");
+				return RedrawMenuItem(text);
+			}
+			if (StrEqual(info, "width"))
+			{
+				Format(text, sizeof text, "Beam width: [%s]", g_BEAM_WIDTH_NAMES[g_iBeamWidth[param1]]);
+				return RedrawMenuItem(text);
+			}
+			if (StrEqual(info, "opacity"))
+			{
+				int alpha = g_ALPHAS[menu == g_ClipMenu ? g_iClipAlpha[param1] : g_iTriggerAlpha[param1]];
+				Format(text, sizeof text, "Opacity: [%d%%]", alpha * 100 / 255);
 				return RedrawMenuItem(text);
 			}
 
@@ -1540,6 +1661,7 @@ public int menuHandler_Selection(Menu menu, MenuAction action, int param1, int p
 public void OnClientDisconnect(int client)
 {
 	g_bRestorePending[client] = false;
+	g_bSettingsApplied[client] = false;
 	g_bClientHasModel[client] = false;
 	g_bModelBusy[client] = false;
 	g_iVerifyPending[client] = 0;
@@ -1678,6 +1800,7 @@ void SetBrushVisible(int ent, SDKHookCB f, bool visible)
 {
 	if (visible)
 	{
+		SetEntityRenderMode(ent, RENDER_TRANSCOLOR);
 		SetEntData(ent, g_iOffsetMFEffects, GetEntData(ent, g_iOffsetMFEffects) & ~EF_NODRAW);
 		ChangeEdictState(ent, g_iOffsetMFEffects);
 		SetEdictFlags(ent, GetEdictFlags(ent) & ~FL_EDICT_DONTSEND);
@@ -1740,14 +1863,14 @@ void ResetTriggerColor(int entity)
 	}
 }
 
-void ColorTriggerMultiple(int entity)
+void ColorTriggerMultiple(int entity, int alpha = 255)
 {
 	switch (g_iMultipleKind[TriggerOf(entity)])
 	{
-		case MULTIPLE_GRAVITY_40:   SetEntityRenderColor(entity, 255, 100, 0, 255);
-		case MULTIPLE_GRAVITY_NEG:  SetEntityRenderColor(entity, 0, 255, 185, 255);
-		case MULTIPLE_BASEVELOCITY: SetEntityRenderColor(entity, 0, 255, 0, 255);
-		default:                    SetEntityRenderColor(entity, 255, 255, 255, 255);
+		case MULTIPLE_GRAVITY_40:   SetEntityRenderColor(entity, 255, 100, 0, alpha);
+		case MULTIPLE_GRAVITY_NEG:  SetEntityRenderColor(entity, 0, 255, 185, alpha);
+		case MULTIPLE_BASEVELOCITY: SetEntityRenderColor(entity, 0, 255, 0, alpha);
+		default:                    SetEntityRenderColor(entity, 255, 255, 255, alpha);
 	}
 }
 
@@ -1786,7 +1909,7 @@ public Action hookST_triggerMultiple(int entity, int client)
 		return Plugin_Handled;
 
 	// Normal coloring
-	ColorTriggerMultiple(entity);
+	ColorTriggerMultiple(entity, g_ALPHAS[g_iTriggerAlpha[client]]);
 	return Plugin_Continue;
 }
 
@@ -1823,7 +1946,7 @@ public Action hookST_triggerPush(int entity, int client)
 		return Plugin_Handled;
 
 	// Normal coloring
-	SetEntityRenderColor(entity, 0, 255, 0, 255);
+	SetEntityRenderColor(entity, 0, 255, 0, g_ALPHAS[g_iTriggerAlpha[client]]);
 	return Plugin_Continue;
 }
 
@@ -1860,7 +1983,7 @@ public Action hookST_triggerTeleport(int entity, int client)
 		return Plugin_Handled;
 
 	// Normal coloring
-	SetEntityRenderColor(entity, 255, 0, 0, 255);
+	SetEntityRenderColor(entity, 255, 0, 0, g_ALPHAS[g_iTriggerAlpha[client]]);
 	return Plugin_Continue;
 }
 
@@ -1897,7 +2020,7 @@ public Action hookST_triggerTeleportRelative(int entity, int client)
 		return Plugin_Handled;
 
 	// Normal coloring
-	SetEntityRenderColor(entity, 255, 0, 0, 255);
+	SetEntityRenderColor(entity, 255, 0, 0, g_ALPHAS[g_iTriggerAlpha[client]]);
 	return Plugin_Continue;
 }
 
@@ -1912,6 +2035,7 @@ public Action hookST_ClipType(int entity, int client)
 	}
 	if (g_bUseSelectionMode[client])
 		return Plugin_Handled;
+	SetEntityRenderColor(entity, 255, 255, 255, g_ALPHAS[g_iClipAlpha[client]]);
 	return Plugin_Continue;
 }
 
@@ -1941,7 +2065,7 @@ public Action hookST_Clip(int entity, int client)
 	}
 	if (g_bUseSelectionMode[client] && selected)
 	{
-		SetEntityRenderColor(entity, 255, 255, 255, 255);
+		SetEntityRenderColor(entity, 255, 255, 255, g_ALPHAS[g_iClipAlpha[client]]);
 		return Plugin_Continue;
 	}
 	return Plugin_Handled;
@@ -2915,7 +3039,7 @@ public void DrainBeams(int userId)
 		color[0] = (item[6] >> 16) & 0xFF;
 		color[1] = (item[6] >> 8) & 0xFF;
 		color[2] = item[6] & 0xFF;
-		TE_SetupBeamPoints(start, end, g_iBeamSprite, 0, 0, 0, BEAM_LIFETIME, 1.5, 1.5, 0, 0.0, color, 0);
+		TE_SetupBeamPoints(start, end, g_iBeamSprite, 0, 0, 0, BEAM_LIFETIME, g_BEAM_WIDTHS[g_iBeamWidth[client]], g_BEAM_WIDTHS[g_iBeamWidth[client]], 0, 0.0, color, 0);
 		TE_SendToClient(client);
 	}
 	for (int i = 0; i < count; i++)
@@ -4398,6 +4522,7 @@ void ApplySelection(int client, const char[] ids, const char[] clips, const char
 	g_bUseSelectionMode[client] = true;
 	g_bSelectMode[client] = false;
 	SetAllTypes(client, true);
+	SaveSettings(client);
 	CheckBrushes(ShouldRender());
 
 	if (owner[0])
