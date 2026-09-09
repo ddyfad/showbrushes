@@ -12,6 +12,7 @@ This plugin is a [Show Triggers](https://github.com/blankbhop/improved-showtrigg
 - In selection mode (`!select`) the plugin shows every trigger. The trigger under the crosshair is cyan. Picked triggers are yellow. The plugin caches all `trigger_*` entities on map start. To find the aimed trigger, it tests the ray from the eyes against the bounding box of each trigger with the slab method.
 - After `!confirm`, `!st` shows or hides only the picked triggers. `!reset` returns to the normal mode with trigger types.
 - The settings menu has a `Selection...` submenu with the same actions: selection mode, pick, confirm, clear, and reset. Selection does not require chat commands.
+- The plugin saves each confirmed selection for the player and the map. It stores the trigger `hammerid` values in the `st_selections` table of the SourceMod `storage-local` SQLite database. When the player joins that map again, the plugin loads the selection and shows the triggers. `!reset` deletes the saved selection. The `Profile` entry of the selection submenu loads your saved selection. It can also copy the saved selection of a different player for the current map. A copy becomes your saved selection only when you `!confirm` it.
 
 ## Commands
 

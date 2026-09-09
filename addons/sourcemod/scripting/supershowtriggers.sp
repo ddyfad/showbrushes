@@ -55,6 +55,12 @@ int g_iOffsetMFEffects = -1;
 // Main menu
 Menu g_Menu;
 Menu g_SelectionMenu;
+Menu g_ProfileMenu;
+
+Database g_DB;
+StringMap g_TriggerByHammerId;
+bool g_bTriggersCached;
+bool g_bRestorePending[MAXPLAYERS+1];
 
 // Selection mode
 bool g_bSelectMode[MAXPLAYERS+1];
@@ -200,7 +206,18 @@ public void OnPluginStart()
 	selection.AddItem("confirm", "Confirm selection");
 	selection.AddItem("clear", "Clear selection");
 	selection.AddItem("reset", "Reset selection");
+	selection.AddItem("profile", "Profile");
 	g_SelectionMenu = selection;
+
+	Menu profile = new Menu(menuHandler_Profile);
+	profile.SetTitle("Selection Profile");
+	profile.ExitBackButton = true;
+	profile.AddItem("custom", "Custom (yours)");
+	profile.AddItem("copy", "Copy from player");
+	g_ProfileMenu = profile;
+
+	g_TriggerByHammerId = new StringMap();
+	Database.Connect(OnDatabaseConnected, "storage-local");
 
 	// Trigger cache
 	g_AllTriggersOnMap = new ArrayList();
@@ -220,6 +237,7 @@ public void OnPluginStart()
 
 public void OnMapStart()
 {
+	g_bTriggersCached = false;
 	for (int i = 0; i < sizeof g_iProxyTrigger; i++)
 	{
 		g_iProxyTrigger[i] = -1;
@@ -237,6 +255,7 @@ public Action Timer_CacheAllTriggers(Handle timer)
 {
 	// Clear the existing cache
 	g_AllTriggersOnMap.Clear();
+	g_TriggerByHammerId.Clear();
 
 	StringMap kinds = ReadMultipleKindsFromLump();
 
@@ -255,6 +274,8 @@ public Action Timer_CacheAllTriggers(Handle timer)
 		if (StrContains(className, "trigger_") == 0)
 		{
 			g_AllTriggersOnMap.Push(ent);
+			IntToString(GetEntProp(ent, Prop_Data, "m_iHammerID"), hammerId, sizeof hammerId);
+			g_TriggerByHammerId.SetValue(hammerId, ent);
 			count++;
 		}
 
@@ -275,6 +296,16 @@ public Action Timer_CacheAllTriggers(Handle timer)
 
 	delete kinds;
 	PrintToServer("Cached %d triggers on the map", count);
+
+	g_bTriggersCached = true;
+	for (int client = 1; client <= MaxClients; client++)
+	{
+		if (g_bRestorePending[client] && IsClientInGame(client))
+		{
+			g_bRestorePending[client] = false;
+			LoadSelection(client, "", false);
+		}
+	}
 
 	return Plugin_Continue;
 }
@@ -329,6 +360,22 @@ public void OnClientPutInServer(int client)
 	g_bClientHasModel[client] = false;
 	g_bModelBusy[client] = false;
 	g_iVerifyPending[client] = 0;
+}
+
+public void OnClientPostAdminCheck(int client)
+{
+	if (IsFakeClient(client))
+	{
+		return;
+	}
+	if (g_bTriggersCached)
+	{
+		LoadSelection(client, "", false);
+	}
+	else
+	{
+		g_bRestorePending[client] = true;
+	}
 }
 
 public void OnClientConnected(int client)
@@ -797,6 +844,7 @@ public Action cmdConfirmSelection(int client, int args)
 	}
 
 	CheckBrushes(ShouldRender());
+	SaveSelection(client);
 
 	PrintToChat(client, "%sSelection confirmed! %s%d triggers%s selected.",
 		WHITE, GOLD, g_SelectedTriggers[client].Length, WHITE);
@@ -824,6 +872,7 @@ public Action cmdResetSelection(int client, int args)
 	}
 
 	CheckBrushes(ShouldRender());
+	DeleteSelection(client);
 
 	PrintToChat(client, "%sSelection reset. Use %s!st%s or %s!sts%s to show triggers normally.",
 		WHITE, GREEN, WHITE, GREEN, WHITE);
@@ -969,6 +1018,11 @@ public int menuHandler_Selection(Menu menu, MenuAction action, int param1, int p
 				cmdClearSelection(param1, 0);
 			else if (StrEqual(info, "reset"))
 				cmdResetSelection(param1, 0);
+			else if (StrEqual(info, "profile"))
+			{
+				g_ProfileMenu.Display(param1, MENU_TIME_FOREVER);
+				return 0;
+			}
 
 			menu.DisplayAt(param1, menu.Selection, MENU_TIME_FOREVER);
 		}
@@ -1026,6 +1080,7 @@ public int menuHandler_Selection(Menu menu, MenuAction action, int param1, int p
 
 public void OnClientDisconnect(int client)
 {
+	g_bRestorePending[client] = false;
 	g_bClientHasModel[client] = false;
 	g_bModelBusy[client] = false;
 	g_iVerifyPending[client] = 0;
@@ -2494,4 +2549,290 @@ public Action Timer_CheckDelivery(Handle timer, int userId)
 		g_Delivered.ExportToFile(g_sDeliveredPath);
 	}
 	return Plugin_Stop;
+}
+
+public void OnDatabaseConnected(Database db, const char[] error, any data)
+{
+	if (db == null)
+	{
+		LogError("Selection database unavailable: %s", error);
+		return;
+	}
+	g_DB = db;
+	g_DB.Query(OnQueryDone, "CREATE TABLE IF NOT EXISTS st_selections ("
+		... "steamid VARCHAR(32) NOT NULL, map VARCHAR(128) NOT NULL, name VARCHAR(64) NOT NULL, "
+		... "hammerids TEXT NOT NULL, updated INTEGER NOT NULL, PRIMARY KEY (steamid, map))");
+}
+
+public void OnQueryDone(Database db, DBResultSet results, const char[] error, any data)
+{
+	if (results == null)
+	{
+		LogError("Selection query failed: %s", error);
+	}
+}
+
+void SaveSelection(int client)
+{
+	char steamId[32];
+	if (g_DB == null || !GetClientAuthId(client, AuthId_Steam2, steamId, sizeof steamId))
+	{
+		return;
+	}
+
+	int count = g_SelectedTriggers[client].Length;
+	char[] ids = new char[count * 12 + 1];
+	ids[0] = '\0';
+	for (int i = 0; i < count; i++)
+	{
+		int entity = g_SelectedTriggers[client].Get(i);
+		if (IsValidEntity(entity))
+		{
+			Format(ids, count * 12 + 1, "%s%s%d", ids, ids[0] ? "," : "", GetEntProp(entity, Prop_Data, "m_iHammerID"));
+		}
+	}
+
+	char name[MAX_NAME_LENGTH], map[PLATFORM_MAX_PATH];
+	GetClientName(client, name, sizeof name);
+	GetCurrentMap(map, sizeof map);
+	int length = strlen(ids) + 512;
+	char[] query = new char[length];
+	g_DB.Format(query, length, "REPLACE INTO st_selections (steamid, map, name, hammerids, updated) VALUES ('%s', '%s', '%s', '%s', %d)",
+		steamId, map, name, ids, GetTime());
+	g_DB.Query(OnQueryDone, query);
+}
+
+void DeleteSelection(int client)
+{
+	char steamId[32], map[PLATFORM_MAX_PATH], query[256];
+	if (g_DB == null || !GetClientAuthId(client, AuthId_Steam2, steamId, sizeof steamId))
+	{
+		return;
+	}
+	GetCurrentMap(map, sizeof map);
+	g_DB.Format(query, sizeof query, "DELETE FROM st_selections WHERE steamid = '%s' AND map = '%s'", steamId, map);
+	g_DB.Query(OnQueryDone, query);
+}
+
+void LoadSelection(int client, const char[] ownerId, bool announce)
+{
+	char steamId[32], map[PLATFORM_MAX_PATH], query[256];
+	if (g_DB == null)
+	{
+		return;
+	}
+	if (ownerId[0])
+	{
+		strcopy(steamId, sizeof steamId, ownerId);
+	}
+	else if (!GetClientAuthId(client, AuthId_Steam2, steamId, sizeof steamId))
+	{
+		return;
+	}
+	GetCurrentMap(map, sizeof map);
+	g_DB.Format(query, sizeof query, "SELECT name, hammerids FROM st_selections WHERE steamid = '%s' AND map = '%s'", steamId, map);
+
+	DataPack pack = new DataPack();
+	pack.WriteCell(GetClientUserId(client));
+	pack.WriteCell(ownerId[0] != '\0');
+	pack.WriteCell(announce);
+	g_DB.Query(OnSelectionLoaded, query, pack);
+}
+
+public void OnSelectionLoaded(Database db, DBResultSet results, const char[] error, DataPack pack)
+{
+	pack.Reset();
+	int client = GetClientOfUserId(pack.ReadCell());
+	bool copied = pack.ReadCell();
+	bool announce = pack.ReadCell();
+	delete pack;
+
+	if (results == null)
+	{
+		LogError("Selection query failed: %s", error);
+		return;
+	}
+	if (client == 0 || !IsClientInGame(client))
+	{
+		return;
+	}
+	if (!results.FetchRow())
+	{
+		if (announce)
+		{
+			PrintToChat(client, "%sNo saved selection for this map. Confirm a selection to save it.", WHITE);
+		}
+		return;
+	}
+
+	char name[MAX_NAME_LENGTH], ids[4096];
+	results.FetchString(0, name, sizeof name);
+	results.FetchString(1, ids, sizeof ids);
+	ApplySelection(client, ids, copied ? name : "");
+}
+
+int ResolveHammerIds(const char[] ids, ArrayList entities)
+{
+	int count = 0, entity, start = 0;
+	char id[16];
+	while (start != -1)
+	{
+		int next = SplitString(ids[start], ",", id, sizeof id);
+		if (next == -1)
+		{
+			strcopy(id, sizeof id, ids[start]);
+			start = -1;
+		}
+		else
+		{
+			start += next;
+		}
+		if (id[0] && g_TriggerByHammerId.GetValue(id, entity) && IsValidEntity(entity))
+		{
+			if (entities != null)
+			{
+				entities.Push(entity);
+			}
+			count++;
+		}
+	}
+	return count;
+}
+
+void ApplySelection(int client, const char[] ids, const char[] owner)
+{
+	g_SelectedTriggers[client].Clear();
+	int count = ResolveHammerIds(ids, g_SelectedTriggers[client]);
+	if (count == 0)
+	{
+		PrintToChat(client, "%sThat selection has no triggers on this map.", WHITE);
+		return;
+	}
+
+	g_bUseSelectionMode[client] = true;
+	g_bSelectMode[client] = false;
+	for (int i = 0; i < MAX_TYPES; i++)
+	{
+		g_bTypeEnabled[client][i] = true;
+	}
+	CheckBrushes(ShouldRender());
+
+	if (owner[0])
+	{
+		PrintToChat(client, "%sCopied %s%s%s's selection: %s%d%s triggers. Use %s!confirm%s to keep it as yours.",
+			WHITE, GOLD, owner, WHITE, GOLD, count, WHITE, GREEN, WHITE);
+	}
+	else
+	{
+		PrintToChat(client, "%sLoaded your saved selection: %s%d%s triggers.", WHITE, GOLD, count, WHITE);
+	}
+}
+
+public int menuHandler_Profile(Menu menu, MenuAction action, int param1, int param2)
+{
+	switch (action)
+	{
+		case MenuAction_Select:
+		{
+			char info[8];
+			menu.GetItem(param2, info, sizeof info);
+			if (StrEqual(info, "custom"))
+			{
+				LoadSelection(param1, "", true);
+				menu.DisplayAt(param1, menu.Selection, MENU_TIME_FOREVER);
+			}
+			else
+			{
+				ShowProfileList(param1);
+			}
+		}
+		case MenuAction_Cancel:
+		{
+			if (param2 == MenuCancel_ExitBack)
+			{
+				g_SelectionMenu.Display(param1, MENU_TIME_FOREVER);
+			}
+		}
+	}
+	return 0;
+}
+
+void ShowProfileList(int client)
+{
+	char steamId[32], map[PLATFORM_MAX_PATH], query[256];
+	if (g_DB == null || !GetClientAuthId(client, AuthId_Steam2, steamId, sizeof steamId))
+	{
+		return;
+	}
+	GetCurrentMap(map, sizeof map);
+	g_DB.Format(query, sizeof query, "SELECT steamid, name, hammerids FROM st_selections WHERE map = '%s' AND steamid <> '%s' ORDER BY updated DESC",
+		map, steamId);
+	g_DB.Query(OnProfileListLoaded, query, GetClientUserId(client));
+}
+
+public void OnProfileListLoaded(Database db, DBResultSet results, const char[] error, any userId)
+{
+	int client = GetClientOfUserId(userId);
+	if (results == null)
+	{
+		LogError("Selection query failed: %s", error);
+		return;
+	}
+	if (client == 0 || !IsClientInGame(client))
+	{
+		return;
+	}
+
+	Menu menu = new Menu(menuHandler_ProfileList);
+	menu.SetTitle("Copy from player");
+	menu.ExitBackButton = true;
+
+	char steamId[32], name[MAX_NAME_LENGTH], ids[4096], text[MAX_NAME_LENGTH + 16];
+	while (results.FetchRow())
+	{
+		results.FetchString(0, steamId, sizeof steamId);
+		results.FetchString(1, name, sizeof name);
+		results.FetchString(2, ids, sizeof ids);
+		int count = ResolveHammerIds(ids, null);
+		if (count > 0)
+		{
+			Format(text, sizeof text, "%s (%d)", name, count);
+			menu.AddItem(steamId, text);
+		}
+	}
+
+	if (menu.ItemCount == 0)
+	{
+		delete menu;
+		PrintToChat(client, "%sNobody has saved a selection on this map yet.", WHITE);
+		g_ProfileMenu.Display(client, MENU_TIME_FOREVER);
+		return;
+	}
+	menu.Display(client, MENU_TIME_FOREVER);
+}
+
+public int menuHandler_ProfileList(Menu menu, MenuAction action, int param1, int param2)
+{
+	switch (action)
+	{
+		case MenuAction_Select:
+		{
+			char steamId[32];
+			menu.GetItem(param2, steamId, sizeof steamId);
+			LoadSelection(param1, steamId, true);
+			g_ProfileMenu.Display(param1, MENU_TIME_FOREVER);
+		}
+		case MenuAction_Cancel:
+		{
+			if (param2 == MenuCancel_ExitBack)
+			{
+				g_ProfileMenu.Display(param1, MENU_TIME_FOREVER);
+			}
+		}
+		case MenuAction_End:
+		{
+			delete menu;
+		}
+	}
+	return 0;
 }
