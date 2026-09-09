@@ -259,6 +259,8 @@ public void OnPluginStart()
 	RegConsoleCmd("sm_showbrushessettings", cmdShowTriggersSettings, "Toggle brush settings menu");
 	RegConsoleCmd("sm_sbsettings", cmdShowTriggersSettings, "Toggle brush settings menu");
 	RegConsoleCmd("sm_sbs", cmdShowTriggersSettings, "Toggle brush settings menu");
+	RegConsoleCmd("sm_sts", cmdShowTriggerTypes, "Open the trigger types menu");
+	RegConsoleCmd("sm_scs", cmdShowClipTypes, "Open the clip types menu");
 	RegConsoleCmd("sm_showtriggers", cmdShowTriggers, "Toggles brush visibility");
 	RegConsoleCmd("sm_st", cmdShowTriggers, "Toggles brush visibility");
 	RegConsoleCmd("sm_showclips", cmdShowClips, "Toggles clip visibility");
@@ -1269,6 +1271,24 @@ public Action cmdShowTriggersSettings(int client, int args)
 		}
 	}
 
+	return Plugin_Handled;
+}
+
+public Action cmdShowTriggerTypes(int client, int args)
+{
+	if (IsValidClient(client))
+	{
+		g_TriggerMenu.Display(client, MENU_TIME_FOREVER);
+	}
+	return Plugin_Handled;
+}
+
+public Action cmdShowClipTypes(int client, int args)
+{
+	if (IsValidClient(client))
+	{
+		g_ClipMenu.Display(client, MENU_TIME_FOREVER);
+	}
 	return Plugin_Handled;
 }
 
