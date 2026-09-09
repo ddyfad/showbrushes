@@ -864,8 +864,17 @@ void FindAimTarget(int client, int &trigger, int &clip)
 	GetClientEyePosition(client, eyePos);
 	GetClientEyeAngles(client, eyeAngles);
 
-	TR_TraceRay(eyePos, eyeAngles, MASK_SOLID_BRUSHONLY, RayType_Infinite);
+	TR_TraceRayFilter(eyePos, eyeAngles, MASK_SOLID_BRUSHONLY, RayType_Infinite, TraceFilter_NoPlayers);
 	TR_GetEndPosition(endPos);
+
+	float dir[3];
+	SubtractVectors(endPos, eyePos, dir);
+	float length = GetVectorLength(dir);
+	if (length > 0.0)
+	{
+		ScaleVector(dir, (length + 1.0) / length);
+	}
+	AddVectors(eyePos, dir, endPos);
 
 	int closestTrigger = -1, insideTrigger = -1;
 	float closestFraction = 1.0;
@@ -895,14 +904,6 @@ void FindAimTarget(int client, int &trigger, int &clip)
 		}
 	}
 
-	float dir[3];
-	SubtractVectors(endPos, eyePos, dir);
-	float length = GetVectorLength(dir);
-	if (length > 0.0)
-	{
-		ScaleVector(dir, (length + 1.0) / length);
-	}
-
 	int closestClip = -1, insideClip = -1;
 	float closestClipDistance = 0.0;
 	count = g_Clips.Length;
@@ -927,7 +928,7 @@ void FindAimTarget(int client, int &trigger, int &clip)
 		}
 	}
 
-	if (closestTrigger != -1 && (closestClip == -1 || closestFraction * length <= closestClipDistance))
+	if (closestTrigger != -1 && (closestClip == -1 || closestFraction * (length + 1.0) <= closestClipDistance))
 	{
 		trigger = closestTrigger;
 	}
@@ -943,6 +944,11 @@ void FindAimTarget(int client, int &trigger, int &clip)
 	{
 		clip = insideClip;
 	}
+}
+
+public bool TraceFilter_NoPlayers(int entity, int contentsMask, any data)
+{
+	return entity > MaxClients;
 }
 
 bool RayHitsClip(int index, const float start[3], const float dir[3], float &tEnter, bool &inside)
