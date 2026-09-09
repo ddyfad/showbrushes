@@ -7,10 +7,10 @@
 #include <output_info_plugin>
 
 #define PLUGIN_NAME "super showtriggers"
-#define PLUGIN_AUTHOR "gangy "
+#define PLUGIN_AUTHOR "gangy & tommy"
 #define PLUGIN_DESCRIPTION "Toggle brush visibility with selection mode"
 #define PLUGIN_VERSION "1"
-#define PLUGIN_URL ""
+#define PLUGIN_URL "https://github.com/dowoge/supershowtriggers"
 
 #define EF_NODRAW 32
 
@@ -29,6 +29,7 @@ public Plugin myinfo =
 	url = PLUGIN_URL
 }
 
+#define SELECTION_MENU            -3
 #define ENABLE_ALL                -2
 #define DISABLE_ALL               -1
 #define TRIGGER_MULTIPLE           0
@@ -52,6 +53,7 @@ int g_iOffsetMFEffects = -1;
 
 // Main menu
 Menu g_Menu;
+Menu g_SelectionMenu;
 
 // Selection mode
 bool g_bSelectMode[MAXPLAYERS+1];
@@ -95,7 +97,18 @@ public void OnPluginStart()
 	{
 		menu.AddItem(IntToStringEx(i), g_NAMES[i]);
 	}
+	menu.AddItem("-3", "\nSelection...");
 	g_Menu = menu;
+
+	Menu selection = new Menu(menuHandler_Selection, MenuAction_DrawItem|MenuAction_DisplayItem);
+	selection.SetTitle("Trigger Selection");
+	selection.ExitBackButton = true;
+	selection.AddItem("select", "Selection mode");
+	selection.AddItem("pick", "Pick aimed trigger");
+	selection.AddItem("confirm", "Confirm selection");
+	selection.AddItem("clear", "Clear selection");
+	selection.AddItem("reset", "Reset selection");
+	g_SelectionMenu = selection;
 
 	// Trigger cache
 	g_AllTriggersOnMap = new ArrayList();
@@ -657,9 +670,6 @@ public Action cmdShowTriggersSettings(int client, int args)
 {
 	if (IsValidClient(client))
 	{
-		// The settings menu leaves selection mode
-		g_bUseSelectionMode[client] = false;
-
 		if (client)
 		{
 			g_Menu.Display(client, MENU_TIME_FOREVER);
@@ -688,9 +698,6 @@ public int menuHandler_Main(Menu menu, MenuAction action, int param1, int param2
 					{
 						g_bTypeEnabled[param1][i] = true;
 					}
-
-					// Leave selection mode
-					g_bUseSelectionMode[param1] = false;
 				}
 				case DISABLE_ALL:
 				{
@@ -700,13 +707,15 @@ public int menuHandler_Main(Menu menu, MenuAction action, int param1, int param2
 						g_bTypeEnabled[param1][i] = false;
 					}
 				}
+				case SELECTION_MENU:
+				{
+					g_SelectionMenu.Display(param1, MENU_TIME_FOREVER);
+					return 0;
+				}
 				default:
 				{
 					// Toggle selected type
 					g_bTypeEnabled[param1][type] = !g_bTypeEnabled[param1][type];
-
-					// Leave selection mode
-					g_bUseSelectionMode[param1] = false;
 				}
 			}
 
@@ -768,6 +777,80 @@ public int menuHandler_Main(Menu menu, MenuAction action, int param1, int param2
 				{
 					StrCat(text, sizeof text, ": [OFF]");
 				}
+			}
+		}
+	}
+
+	return 0;
+}
+
+public int menuHandler_Selection(Menu menu, MenuAction action, int param1, int param2)
+{
+	switch (action)
+	{
+		case MenuAction_Select:
+		{
+			char info[8];
+			menu.GetItem(param2, info, sizeof info);
+
+			if (StrEqual(info, "select"))
+				cmdToggleSelectMode(param1, 0);
+			else if (StrEqual(info, "pick"))
+				cmdPickTrigger(param1, 0);
+			else if (StrEqual(info, "confirm"))
+				cmdConfirmSelection(param1, 0);
+			else if (StrEqual(info, "clear"))
+				cmdClearSelection(param1, 0);
+			else if (StrEqual(info, "reset"))
+				cmdResetSelection(param1, 0);
+
+			menu.DisplayAt(param1, menu.Selection, MENU_TIME_FOREVER);
+		}
+		case MenuAction_DrawItem:
+		{
+			char info[8];
+			menu.GetItem(param2, info, sizeof info);
+
+			int count = g_SelectedTriggers[param1].Length;
+			if (StrEqual(info, "pick") && !g_bSelectMode[param1])
+			{
+				return ITEMDRAW_DISABLED;
+			}
+			if ((StrEqual(info, "confirm") || StrEqual(info, "clear")) && (!g_bSelectMode[param1] || count == 0))
+			{
+				return ITEMDRAW_DISABLED;
+			}
+			if (StrEqual(info, "reset") && count == 0 && !g_bUseSelectionMode[param1])
+			{
+				return ITEMDRAW_DISABLED;
+			}
+
+			return ITEMDRAW_DEFAULT;
+		}
+		case MenuAction_DisplayItem:
+		{
+			char info[8];
+			char text[64];
+			menu.GetItem(param2, info, sizeof info, _, text, sizeof text);
+
+			if (StrEqual(info, "select"))
+			{
+				Format(text, sizeof text, "Selection mode: [%s]", g_bSelectMode[param1] ? "ON" : "OFF");
+				return RedrawMenuItem(text);
+			}
+
+			int count = g_SelectedTriggers[param1].Length;
+			if (StrEqual(info, "confirm") && count > 0)
+			{
+				Format(text, sizeof text, "Confirm selection (%d)", count);
+				return RedrawMenuItem(text);
+			}
+		}
+		case MenuAction_Cancel:
+		{
+			if (param2 == MenuCancel_ExitBack)
+			{
+				g_Menu.Display(param1, MENU_TIME_FOREVER);
 			}
 		}
 	}
