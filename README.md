@@ -6,7 +6,9 @@ This plugin is a [Show Triggers](https://github.com/blankbhop/improved-showtrigg
 
 - The plugin shows `trigger_multiple`, `trigger_push`, `trigger_teleport` and `trigger_teleport_relative` brushes for each player. It removes `EF_NODRAW` from the brush and filters the brush for each player in a `SDKHook_SetTransmit` hook.
 - The plugin colors each trigger by its type. Push triggers are green. Teleports are red. A `trigger_multiple` is orange for `gravity 40` outputs, teal for `gravity -` outputs, and green for `basevelocity` outputs. The plugin reads the outputs from the entity lump of the map with the SourceMod `EntityLump` natives. It matches each output to an entity by `hammerid`.
-- Triggers with only `nodraw` textures have no faces in the BSP. The engine cannot draw them. For these triggers the plugin reads the brush planes from the map file and builds the polygons again. On map start it writes a studio model to `models/supershowtriggers/<map>_<hash>.mdl`, `.vvd` and `.dx90.vtx`. It then spawns one `prop_dynamic_override` for each trigger. The prop shows the mesh of the trigger with the same `SetTransmit` rules and colors as a brush. The plugin adds the model files and `materials/supershowtriggers/trigger2.vmt` to the download table.
+- Triggers with only `nodraw` textures have no faces in the BSP. The engine cannot draw them. For these triggers the plugin reads the brush planes from the map file and builds the polygons again. On map start it writes a studio model to `models/supershowtriggers/<map>_<hash>.mdl`, `.vvd` and `.dx90.vtx`. It then spawns one `prop_dynamic_override` for each trigger. The prop shows the mesh of the trigger with the same `SetTransmit` rules and colors as a brush.
+- The plugin sends the model files and `materials/supershowtriggers/trigger2.vmt` to each client over the game connection with `INetChannel::SendFile`. It shows the progress in the chat. No fastdl is necessary. The plugin precaches the model without preload. Thus a client loads the model only when the plugin sends it a stand-in prop. The plugin does not send stand-in props to a client until the transfer is complete. The plugin sends the files only to a client that turns `/st` on while the map has nodraw triggers.
+- The plugin records each completed transfer by SteamID in `addons/sourcemod/data/supershowtriggers_delivered.txt`. When a recorded client joins the map again, the plugin asks the client for the vmt and mdl files with `INetChannel::RequestFile`. This requires `cl_allowupload 1` on the client. The plugin sends the files again only if the client does not have them or does not answer in 10 seconds. The plugin writes the reason for each repeated transfer to the SourceMod log.
 - In selection mode (`!select`) the plugin shows every trigger. The trigger under the crosshair is cyan. Picked triggers are yellow. The plugin caches all `trigger_*` entities on map start. To find the aimed trigger, it tests the ray from the eyes against the bounding box of each trigger with the slab method.
 - After `!confirm`, `!st` shows or hides only the picked triggers. `!reset` returns to the normal mode with trigger types.
 - The settings menu has a `Selection...` submenu with the same actions: selection mode, pick, confirm, clear, and reset. Selection does not require chat commands.
@@ -27,7 +29,18 @@ This plugin is a [Show Triggers](https://github.com/blankbhop/improved-showtrigg
 ## Requirements
 
 - SourceMod 1.12 with SDKHooks and SDKTools. The `EntityLump` natives are part of 1.12.
-- `materials/supershowtriggers/trigger2.vmt` in the game directory. The clients download this file and the generated models through `sv_downloadurl` if the files are on that server. Otherwise they download the files from the game server.
+- `materials/supershowtriggers/trigger2.vmt` in the game directory.
+- `addons/sourcemod/gamedata/supershowtriggers.games.txt`. It contains the netchannel vtable slots and struct offsets. The Linux values are verified against the CS:S build 10897846 client and dedicated server binaries. The Windows values are derived and not verified.
+- `sv_pure 1` with these lines in `cfg/pure_server_whitelist.txt`. Without them the clients do not load the transferred files. With `sv_pure 2` the clients do not load custom files at all.
+
+  ```
+  whitelist
+  {
+  	models\supershowtriggers\...      any
+  	materials\supershowtriggers\...   any
+  }
+  ```
+- Clients must keep `sv_allowupload` at its default value of 1. Otherwise the engine discards the transferred files.
 
 ## Building
 

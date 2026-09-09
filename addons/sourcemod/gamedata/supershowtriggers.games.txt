@@ -1,0 +1,102 @@
+"Games"
+{
+	"cstrike"
+	{
+		"Offsets"
+		{
+			// IVEngineServer::GetPlayerNetInfo(int playerIndex)
+			"GetPlayerNetInfo"
+			{
+				"windows"	"20"
+				"linux"		"20"
+			}
+			// INetChannelInfo::GetStreamProgress(int flow, int *received, int *total)
+			"GetStreamProgress"
+			{
+				"windows"	"20"
+				"linux"		"20"
+			}
+			// INetChannel::SendFile(const char *filename, unsigned int transferID)
+			"SendFile"
+			{
+				"windows"	"39"
+				"linux"		"40"
+			}
+			// CNetChan::m_WaitingList[FRAG_FILE_STREAM].Count()
+			"FileStreamWaitingCount"
+			{
+				"windows"	"280"
+				"linux"		"280"
+			}
+			// CNetChan::m_ReceiveList[FRAG_FILE_STREAM].buffer
+			"FileStreamReceiveBuffer"
+			{
+				"windows"	"852"
+				"linux"		"852"
+			}
+			// INetChannel::GetMsgHandler()
+			"GetMsgHandler"
+			{
+				"windows"	"46"
+				"linux"		"47"
+			}
+			// INetChannel::RequestFile(const char *filename)
+			"RequestFile"
+			{
+				"windows"	"59"
+				"linux"		"60"
+			}
+			// INetChannelHandler::FileReceived(const char *fileName, unsigned int transferID)
+			"FileReceived"
+			{
+				"windows"	"7"
+				"linux"		"8"
+			}
+			// INetChannelHandler::FileDenied(const char *fileName, unsigned int transferID)
+			"FileDenied"
+			{
+				"windows"	"8"
+				"linux"		"9"
+			}
+		}
+		"Functions"
+		{
+			"FileReceived"
+			{
+				"offset"	"FileReceived"
+				"hooktype"	"raw"
+				"return"	"void"
+				"this"		"address"
+				"arguments"
+				{
+					"fileName"
+					{
+						"type"	"charptr"
+					}
+					"transferID"
+					{
+						"type"	"int"
+					}
+				}
+			}
+			"FileDenied"
+			{
+				"offset"	"FileDenied"
+				"hooktype"	"raw"
+				"return"	"void"
+				"this"		"address"
+				"arguments"
+				{
+					"fileName"
+					{
+						"type"	"charptr"
+					}
+					"transferID"
+					{
+						"type"	"int"
+					}
+				}
+			}
+		}
+	}
+}

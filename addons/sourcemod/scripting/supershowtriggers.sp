@@ -5,6 +5,7 @@
 #include <sdkhooks>
 #include <sdktools>
 #include <entitylump>
+#include <dhooks>
 
 #define PLUGIN_NAME "super showtriggers"
 #define PLUGIN_AUTHOR "gangy & tommy"
@@ -79,6 +80,29 @@ bool g_bHooked;
 ArrayList g_FacelessModels;
 char g_sModelPath[PLATFORM_MAX_PATH];
 
+Handle g_hGetPlayerNetInfo;
+Handle g_hSendFile;
+Handle g_hGetStreamProgress;
+Handle g_hGetMsgHandler;
+Handle g_hRequestFile;
+DynamicHook g_hFileReceived;
+DynamicHook g_hFileDenied;
+KeyValues g_Delivered;
+char g_sDeliveredPath[PLATFORM_MAX_PATH];
+char g_sModelBase[64];
+char g_sPushFiles[4][PLATFORM_MAX_PATH];
+int g_iPushSize[4];
+int g_iPushTotal;
+int g_iFileStreamCount;
+int g_iFileStreamReceive;
+bool g_bClientHasModel[MAXPLAYERS+1];
+bool g_bModelBusy[MAXPLAYERS+1];
+Address g_MsgHandler[MAXPLAYERS+1];
+int g_iHandlerHooks[MAXPLAYERS+1][2];
+int g_iVerifyPending[MAXPLAYERS+1];
+int g_iVerifyTicks[MAXPLAYERS+1];
+int g_iPushNext[MAXPLAYERS+1];
+
 public void OnPluginStart()
 {
 	g_iOffsetMFEffects = FindSendPropInfo("CBaseEntity", "m_fEffects");
@@ -86,6 +110,60 @@ public void OnPluginStart()
 	{
 		SetFailState("Could not find CBaseEntity:m_fEffects");
 	}
+
+	GameData gamedata = new GameData("supershowtriggers.games");
+	if (gamedata == null)
+	{
+		SetFailState("Missing gamedata/supershowtriggers.games.txt");
+	}
+
+	StartPrepSDKCall(SDKCall_Engine);
+	PrepSDKCall_SetFromConf(gamedata, SDKConf_Virtual, "GetPlayerNetInfo");
+	PrepSDKCall_AddParameter(SDKType_PlainOldData, SDKPass_Plain);
+	PrepSDKCall_SetReturnInfo(SDKType_PlainOldData, SDKPass_Plain);
+	g_hGetPlayerNetInfo = EndPrepSDKCall();
+
+	StartPrepSDKCall(SDKCall_Raw);
+	PrepSDKCall_SetFromConf(gamedata, SDKConf_Virtual, "SendFile");
+	PrepSDKCall_AddParameter(SDKType_String, SDKPass_Pointer);
+	PrepSDKCall_AddParameter(SDKType_PlainOldData, SDKPass_Plain);
+	PrepSDKCall_SetReturnInfo(SDKType_Bool, SDKPass_Plain);
+	g_hSendFile = EndPrepSDKCall();
+
+	StartPrepSDKCall(SDKCall_Raw);
+	PrepSDKCall_SetFromConf(gamedata, SDKConf_Virtual, "GetStreamProgress");
+	PrepSDKCall_AddParameter(SDKType_PlainOldData, SDKPass_Plain);
+	PrepSDKCall_AddParameter(SDKType_PlainOldData, SDKPass_ByRef, VDECODE_FLAG_BYREF, VENCODE_FLAG_COPYBACK);
+	PrepSDKCall_AddParameter(SDKType_PlainOldData, SDKPass_ByRef, VDECODE_FLAG_BYREF, VENCODE_FLAG_COPYBACK);
+	PrepSDKCall_SetReturnInfo(SDKType_Bool, SDKPass_Plain);
+	g_hGetStreamProgress = EndPrepSDKCall();
+	g_iFileStreamCount = GameConfGetOffset(gamedata, "FileStreamWaitingCount");
+	g_iFileStreamReceive = GameConfGetOffset(gamedata, "FileStreamReceiveBuffer");
+
+	StartPrepSDKCall(SDKCall_Raw);
+	PrepSDKCall_SetFromConf(gamedata, SDKConf_Virtual, "GetMsgHandler");
+	PrepSDKCall_SetReturnInfo(SDKType_PlainOldData, SDKPass_Plain);
+	g_hGetMsgHandler = EndPrepSDKCall();
+
+	StartPrepSDKCall(SDKCall_Raw);
+	PrepSDKCall_SetFromConf(gamedata, SDKConf_Virtual, "RequestFile");
+	PrepSDKCall_AddParameter(SDKType_String, SDKPass_Pointer);
+	PrepSDKCall_SetReturnInfo(SDKType_PlainOldData, SDKPass_Plain);
+	g_hRequestFile = EndPrepSDKCall();
+
+	g_hFileReceived = DynamicHook.FromConf(gamedata, "FileReceived");
+	g_hFileDenied = DynamicHook.FromConf(gamedata, "FileDenied");
+	delete gamedata;
+
+	if (g_hGetPlayerNetInfo == null || g_hSendFile == null || g_hGetStreamProgress == null || g_iFileStreamCount == -1 || g_iFileStreamReceive == -1
+		|| g_hGetMsgHandler == null || g_hRequestFile == null || g_hFileReceived == null || g_hFileDenied == null)
+	{
+		SetFailState("Could not prepare the netchannel calls");
+	}
+
+	BuildPath(Path_SM, g_sDeliveredPath, sizeof g_sDeliveredPath, "data/supershowtriggers_delivered.txt");
+	g_Delivered = new KeyValues("Delivered");
+	g_Delivered.ImportFromFile(g_sDeliveredPath);
 
 	CreateConVar("sm_showtriggers_version", PLUGIN_VERSION, PLUGIN_DESCRIPTION, FCVAR_SPONLY|FCVAR_NOTIFY|FCVAR_DONTRECORD).SetString(PLUGIN_VERSION);
 
@@ -244,6 +322,13 @@ StringMap ReadMultipleKindsFromLump()
 	}
 
 	return kinds;
+}
+
+public void OnClientPutInServer(int client)
+{
+	g_bClientHasModel[client] = false;
+	g_bModelBusy[client] = false;
+	g_iVerifyPending[client] = 0;
 }
 
 public void OnClientConnected(int client)
@@ -941,6 +1026,17 @@ public int menuHandler_Selection(Menu menu, MenuAction action, int param1, int p
 
 public void OnClientDisconnect(int client)
 {
+	g_bClientHasModel[client] = false;
+	g_bModelBusy[client] = false;
+	g_iVerifyPending[client] = 0;
+	for (int i = 0; i < 2; i++)
+	{
+		if (g_iHandlerHooks[client][i] != 0)
+		{
+			DynamicHook.RemoveHook(g_iHandlerHooks[client][i]);
+			g_iHandlerHooks[client][i] = 0;
+		}
+	}
 	for (int i = 0; i < MAX_TYPES; i++)
 	{
 		g_bTypeEnabled[client][i] = false;
@@ -1134,6 +1230,11 @@ public Action hookST_triggerMultiple(int entity, int client)
 	// Not enabled for this client
 	if (!g_bTypeEnabled[client][TRIGGER_MULTIPLE])
 		return Plugin_Handled;
+	if (trigger != entity && !g_bClientHasModel[client])
+	{
+		EnsureClientModel(client);
+		return Plugin_Handled;
+	}
 
 	// Selected triggers are always shown yellow in selection mode
 	if (g_bSelectMode[client] && g_SelectedTriggers[client].FindValue(trigger) != -1)
@@ -1166,6 +1267,11 @@ public Action hookST_triggerPush(int entity, int client)
 	// Not enabled for this client
 	if (!g_bTypeEnabled[client][TRIGGER_PUSH])
 		return Plugin_Handled;
+	if (trigger != entity && !g_bClientHasModel[client])
+	{
+		EnsureClientModel(client);
+		return Plugin_Handled;
+	}
 
 	// Selected triggers are always shown yellow in selection mode
 	if (g_bSelectMode[client] && g_SelectedTriggers[client].FindValue(trigger) != -1)
@@ -1198,6 +1304,11 @@ public Action hookST_triggerTeleport(int entity, int client)
 	// Not enabled for this client
 	if (!g_bTypeEnabled[client][TRIGGER_TELEPORT])
 		return Plugin_Handled;
+	if (trigger != entity && !g_bClientHasModel[client])
+	{
+		EnsureClientModel(client);
+		return Plugin_Handled;
+	}
 
 	// Selected triggers are always shown yellow in selection mode
 	if (g_bSelectMode[client] && g_SelectedTriggers[client].FindValue(trigger) != -1)
@@ -1230,6 +1341,11 @@ public Action hookST_triggerTeleportRelative(int entity, int client)
 	// Not enabled for this client
 	if (!g_bTypeEnabled[client][TRIGGER_TELEPORT_RELATIVE])
 		return Plugin_Handled;
+	if (trigger != entity && !g_bClientHasModel[client])
+	{
+		EnsureClientModel(client);
+		return Plugin_Handled;
+	}
 
 	// Selected triggers are always shown yellow in selection mode
 	if (g_bSelectMode[client] && g_SelectedTriggers[client].FindValue(trigger) != -1)
@@ -1391,14 +1507,8 @@ void BuildFacelessTriggerModel()
 		ReplaceString(map, sizeof map, "/", "_");
 		if (WriteTriggerModel(map))
 		{
-			AddFileToDownloadsTable(g_sModelPath);
-			strcopy(path, sizeof path, g_sModelPath);
-			ReplaceString(path, sizeof path, ".mdl", ".vvd");
-			AddFileToDownloadsTable(path);
-			ReplaceString(path, sizeof path, ".vvd", ".dx90.vtx");
-			AddFileToDownloadsTable(path);
-			AddFileToDownloadsTable("materials/supershowtriggers/trigger" ... MODEL_VERSION ... ".vmt");
-			PrecacheModel(g_sModelPath, true);
+			PrecacheModel(g_sModelPath, false);
+			SetPushFiles();
 			PrintToServer("%d faceless trigger models in %s", g_FacelessModels.Length, g_sModelPath);
 		}
 	}
@@ -1659,7 +1769,7 @@ void SpawnProxyIfFaceless(int trigger, int type)
 	{
 		return;
 	}
-	DispatchKeyValue(prop, "model", g_sModelPath);
+	DispatchKeyValue(prop, "model", "models/error.mdl");
 	DispatchKeyValue(prop, "solid", "0");
 	DispatchKeyValue(prop, "disableshadows", "1");
 	DispatchKeyValue(prop, "disablereceiveshadows", "1");
@@ -1668,7 +1778,7 @@ void SpawnProxyIfFaceless(int trigger, int type)
 	GetEntPropVector(trigger, Prop_Send, "m_vecOrigin", origin);
 	TeleportEntity(prop, origin, NULL_VECTOR, NULL_VECTOR);
 	DispatchSpawn(prop);
-
+	SetEntityModel(prop, g_sModelPath);
 	SetEntProp(prop, Prop_Send, "m_nBody", body);
 
 	GetEntPropVector(trigger, Prop_Data, "m_vecMins", mins);
@@ -1731,6 +1841,7 @@ bool WriteTriggerModel(const char[] map)
 	Format(base, sizeof base, "models/supershowtriggers/%s_%08x", map, checksum);
 	Format(mdlName, sizeof mdlName, "supershowtriggers/%s_%08x.mdl", map, checksum);
 	Format(path, sizeof path, "%s.dx90.vtx", base);
+	Format(g_sModelBase, sizeof g_sModelBase, "%s_%08x", map, checksum);
 	if (FileExists(path, true, "GAME"))
 	{
 		Format(g_sModelPath, sizeof g_sModelPath, "%s.mdl", base);
@@ -2121,4 +2232,266 @@ void WritePaddedString(File f, const char[] str, int length)
 		WriteFileCell(f, str[i], 1);
 	}
 	WriteZeros(f, length - len);
+}
+
+void SetPushFiles()
+{
+	strcopy(g_sPushFiles[0], PLATFORM_MAX_PATH, "materials/supershowtriggers/trigger" ... MODEL_VERSION ... ".vmt");
+	for (int i = 1; i < 4; i++)
+	{
+		strcopy(g_sPushFiles[i], PLATFORM_MAX_PATH, g_sModelPath);
+	}
+	ReplaceString(g_sPushFiles[2], PLATFORM_MAX_PATH, ".mdl", ".vvd");
+	ReplaceString(g_sPushFiles[3], PLATFORM_MAX_PATH, ".mdl", ".dx90.vtx");
+
+	g_iPushTotal = 0;
+	for (int i = 0; i < 4; i++)
+	{
+		g_iPushSize[i] = FileSize(g_sPushFiles[i], true, "GAME");
+		g_iPushTotal += g_iPushSize[i];
+	}
+}
+
+int PushFileIndex(const char[] name)
+{
+	char path[PLATFORM_MAX_PATH];
+	strcopy(path, sizeof path, name);
+	ReplaceString(path, sizeof path, "\\", "/");
+	for (int i = 0; i < 4; i++)
+	{
+		if (StrEqual(path, g_sPushFiles[i], false))
+		{
+			return i;
+		}
+	}
+	return -1;
+}
+
+int ClientOfHandler(Address handler)
+{
+	for (int client = 1; client <= MaxClients; client++)
+	{
+		if (g_iHandlerHooks[client][0] != 0 && g_MsgHandler[client] == handler)
+		{
+			return client;
+		}
+	}
+	return 0;
+}
+
+void EnsureClientModel(int client)
+{
+	if (g_bModelBusy[client] || IsFakeClient(client))
+	{
+		return;
+	}
+	g_bModelBusy[client] = true;
+	QueryClientConVar(client, "sv_allowupload", OnAllowUploadQueried);
+}
+
+public void OnAllowUploadQueried(QueryCookie cookie, int client, ConVarQueryResult result, const char[] cvarName, const char[] cvarValue)
+{
+	if (!IsClientInGame(client))
+	{
+		return;
+	}
+	if (result == ConVarQuery_Okay && StringToInt(cvarValue) == 0)
+	{
+		PrintToChat(client, "%sNodraw triggers need %ssv_allowupload 1%s in your console and a reconnect.", WHITE, GOLD, WHITE);
+		return;
+	}
+
+	char steamId[32];
+	g_Delivered.Rewind();
+	if (GetClientAuthId(client, AuthId_Steam2, steamId, sizeof steamId)
+		&& g_Delivered.JumpToKey(steamId) && g_Delivered.GetNum(g_sModelBase) > 0)
+	{
+		VerifyModel(client);
+	}
+	else
+	{
+		LogMessage("%N has no record of %s, pushing", client, g_sModelBase);
+		PushModel(client);
+	}
+}
+
+void VerifyModel(int client)
+{
+	Address netchan = SDKCall(g_hGetPlayerNetInfo, client);
+	if (netchan == Address_Null)
+	{
+		g_bModelBusy[client] = false;
+		return;
+	}
+
+	if (g_iHandlerHooks[client][0] == 0)
+	{
+		g_MsgHandler[client] = SDKCall(g_hGetMsgHandler, netchan);
+		g_iHandlerHooks[client][0] = g_hFileReceived.HookRaw(Hook_Post, g_MsgHandler[client], OnFileReceived);
+		g_iHandlerHooks[client][1] = g_hFileDenied.HookRaw(Hook_Post, g_MsgHandler[client], OnFileDenied);
+	}
+
+	g_iVerifyPending[client] = 2;
+	g_iVerifyTicks[client] = 0;
+	for (int i = 0; i < 2; i++)
+	{
+		DeleteFile(g_sPushFiles[i], true, "download");
+		SDKCall(g_hRequestFile, netchan, g_sPushFiles[i]);
+	}
+	CreateTimer(0.1, Timer_VerifyPoll, GetClientUserId(client), TIMER_REPEAT|TIMER_FLAG_NO_MAPCHANGE);
+}
+
+public Action Timer_VerifyPoll(Handle timer, int userId)
+{
+	int client = GetClientOfUserId(userId);
+	if (client == 0 || !IsClientInGame(client) || g_iVerifyPending[client] == 0)
+	{
+		return Plugin_Stop;
+	}
+
+	Address netchan = SDKCall(g_hGetPlayerNetInfo, client);
+	if (netchan != Address_Null && LoadFromAddress(netchan + view_as<Address>(g_iFileStreamReceive), NumberType_Int32) != 0)
+	{
+		g_iVerifyPending[client] = 0;
+		g_bClientHasModel[client] = true;
+		g_bModelBusy[client] = false;
+		return Plugin_Stop;
+	}
+
+	if (++g_iVerifyTicks[client] < 100)
+	{
+		return Plugin_Continue;
+	}
+	g_iVerifyPending[client] = 0;
+	LogMessage("%N did not answer the request for %s, pushing", client, g_sModelBase);
+	PushModel(client);
+	return Plugin_Stop;
+}
+
+public MRESReturn OnFileReceived(Address handler, DHookParam params)
+{
+	int client = ClientOfHandler(handler);
+	if (client == 0 || g_iVerifyPending[client] == 0)
+	{
+		return MRES_Ignored;
+	}
+	char name[PLATFORM_MAX_PATH];
+	params.GetString(1, name, sizeof name);
+	if (PushFileIndex(name) == -1)
+	{
+		return MRES_Ignored;
+	}
+
+	DeleteFile(name, true, "download");
+	if (--g_iVerifyPending[client] == 0)
+	{
+		g_bClientHasModel[client] = true;
+		g_bModelBusy[client] = false;
+	}
+	return MRES_Ignored;
+}
+
+public MRESReturn OnFileDenied(Address handler, DHookParam params)
+{
+	int client = ClientOfHandler(handler);
+	if (client == 0 || g_iVerifyPending[client] == 0)
+	{
+		return MRES_Ignored;
+	}
+	char name[PLATFORM_MAX_PATH];
+	params.GetString(1, name, sizeof name);
+	if (PushFileIndex(name) == -1)
+	{
+		return MRES_Ignored;
+	}
+
+	g_iVerifyPending[client] = 0;
+	LogMessage("%N denied %s, pushing", client, name);
+	PushModel(client);
+	return MRES_Ignored;
+}
+
+void PushModel(int client)
+{
+	Address netchan = SDKCall(g_hGetPlayerNetInfo, client);
+	if (netchan == Address_Null)
+	{
+		g_bModelBusy[client] = false;
+		return;
+	}
+
+	bool sent = true;
+	for (int i = 0; i < 4; i++)
+	{
+		if (!SDKCall(g_hSendFile, netchan, g_sPushFiles[i], i + 1))
+		{
+			LogError("SendFile of %s to %N failed", g_sPushFiles[i], client);
+			sent = false;
+		}
+	}
+	if (!sent)
+	{
+		return;
+	}
+
+	g_iPushNext[client] = 10;
+	PrintToChat(client, "%sDownloading nodraw trigger models (%s%.1f MB%s), they show up once done.",
+		WHITE, GOLD, g_iPushTotal / 1048576.0, WHITE);
+	CreateTimer(1.0, Timer_CheckDelivery, GetClientUserId(client), TIMER_REPEAT|TIMER_FLAG_NO_MAPCHANGE);
+}
+
+public Action Timer_CheckDelivery(Handle timer, int userId)
+{
+	int client = GetClientOfUserId(userId);
+	if (client == 0 || !IsClientInGame(client))
+	{
+		return Plugin_Stop;
+	}
+
+	Address netchan = SDKCall(g_hGetPlayerNetInfo, client);
+	if (netchan == Address_Null)
+	{
+		return Plugin_Continue;
+	}
+
+	int remaining = LoadFromAddress(netchan + view_as<Address>(g_iFileStreamCount), NumberType_Int32);
+	if (remaining > 0)
+	{
+		int current = 4 - remaining;
+		int done = 0;
+		for (int i = 0; i < current; i++)
+		{
+			done += g_iPushSize[i];
+		}
+		int received, total;
+		if (current >= 0 && SDKCall(g_hGetStreamProgress, netchan, 0, received, total))
+		{
+			done += received < g_iPushSize[current] ? received : g_iPushSize[current];
+		}
+		int percent = done * 100 / g_iPushTotal;
+		if (percent >= g_iPushNext[client] && percent < 100)
+		{
+			PrintToChat(client, "%sNodraw trigger models: %s%d%%", WHITE, GOLD, percent);
+			while (g_iPushNext[client] <= percent)
+			{
+				g_iPushNext[client] += 10;
+			}
+		}
+		return Plugin_Continue;
+	}
+
+	g_bClientHasModel[client] = true;
+	g_bModelBusy[client] = false;
+	PrintToChat(client, "%sNodraw trigger models: %sdone", WHITE, GREEN);
+
+	char steamId[32];
+	if (GetClientAuthId(client, AuthId_Steam2, steamId, sizeof steamId))
+	{
+		g_Delivered.Rewind();
+		g_Delivered.JumpToKey(steamId, true);
+		g_Delivered.SetNum(g_sModelBase, 1);
+		g_Delivered.Rewind();
+		g_Delivered.ExportToFile(g_sDeliveredPath);
+	}
+	return Plugin_Stop;
 }
