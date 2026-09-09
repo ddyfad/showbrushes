@@ -73,6 +73,11 @@ enum
 };
 int g_iMultipleKind[2048+1];
 
+int g_iProxyTrigger[2048+1] = {-1, ...};
+int g_iProxyType[2048+1];
+bool g_bHooked;
+ArrayList g_FacelessModels;
+char g_sModelPath[PLATFORM_MAX_PATH];
 
 public void OnPluginStart()
 {
@@ -137,6 +142,12 @@ public void OnPluginStart()
 
 public void OnMapStart()
 {
+	for (int i = 0; i < sizeof g_iProxyTrigger; i++)
+	{
+		g_iProxyTrigger[i] = -1;
+	}
+	BuildFacelessTriggerModel();
+
 	// Cache all triggers when the map starts
 	CreateTimer(1.0, Timer_CacheAllTriggers, _, TIMER_FLAG_NO_MAPCHANGE);
 }
@@ -174,6 +185,14 @@ public Action Timer_CacheAllTriggers(Handle timer)
 			IntToString(GetEntProp(ent, Prop_Data, "m_iHammerID"), hammerId, sizeof hammerId);
 			kinds.GetValue(hammerId, g_iMultipleKind[ent]);
 		}
+
+		for (int type = 0; type < MAX_TYPES; type++)
+		{
+			if (StrEqual(className, g_NAMES[type]))
+			{
+				SpawnProxyIfFaceless(ent, type);
+			}
+		}
 	}
 
 	delete kinds;
@@ -186,7 +205,6 @@ StringMap ReadMultipleKindsFromLump()
 {
 	StringMap kinds = new StringMap();
 	char buffer[256], hammerId[16], parts[5][128];
-	// Output value: "target,input,parameter,delay,once" (\x1B-separated outside CSS)
 	char separator[2] = ",";
 	if (GetEngineVersion() != Engine_CSS)
 		separator = "\x1B";
@@ -607,7 +625,6 @@ public Action cmdShowTriggers(int client, int args)
 		}
 	}
 
-
 	return Plugin_Handled;
 }
 
@@ -659,7 +676,6 @@ public Action cmdToggleSelectMode(int client, int args)
 		PrintToChat(client, "%sSelection mode: %sOFF", WHITE, RED);
 	}
 
-
 	return Plugin_Handled;
 }
 
@@ -702,7 +718,6 @@ public Action cmdConfirmSelection(int client, int args)
 	PrintToChat(client, "%sUse %s!st%s to toggle them on/off.", WHITE, GREEN, WHITE);
 
 	PrintToChat(client, "%sUse %s!reset%s to reset your selection.", WHITE, GREEN, WHITE);
-
 
 	return Plugin_Handled;
 }
@@ -947,6 +962,14 @@ public void OnPluginEnd()
 {
 	CheckBrushes(false);
 
+	for (int ent = MaxClients + 1; ent <= 2048; ent++)
+	{
+		if (g_iProxyTrigger[ent] != -1 && IsValidEntity(ent))
+		{
+			RemoveEntity(ent);
+		}
+	}
+
 	// Clean up the ArrayLists
 	for (int i = 1; i <= MaxClients; i++)
 	{
@@ -962,20 +985,17 @@ public void OnPluginEnd()
 	}
 }
 
-
 // ======================== Normal Functions ========================
 
 void CheckBrushes(bool transmit)
 {
-	static bool hooked = false;
-
 	// If transmit state has not changed, do nothing
-	if (hooked == transmit)
+	if (g_bHooked == transmit)
 	{
 		return;
 	}
 
-	hooked = !hooked;
+	g_bHooked = transmit;
 
 	char className[32];
 	for (int ent = MaxClients + 1; ent <= 2048; ent++)
@@ -985,47 +1005,65 @@ void CheckBrushes(bool transmit)
 			continue;
 		}
 
-		GetEntityClassname(ent, className, sizeof className);
-		if (StrContains(className, "func_") != 0 && StrContains(className, "trigger_") != 0)
+		int type = -1;
+		if (g_iProxyTrigger[ent] != -1)
 		{
-			continue;
+			type = g_iProxyType[ent];
 		}
-
-		for (int i = 0; i < MAX_TYPES; i++)
+		else
 		{
-			if (!StrEqual(className, g_NAMES[i]))
+			GetEntityClassname(ent, className, sizeof className);
+			if (StrContains(className, "func_") != 0 && StrContains(className, "trigger_") != 0)
 			{
 				continue;
 			}
 
-			SDKHookCB f = INVALID_FUNCTION;
-			switch (i)
+			for (int i = 0; i < MAX_TYPES; i++)
 			{
-				case TRIGGER_MULTIPLE:          f = hookST_triggerMultiple;
-				case TRIGGER_PUSH:              f = hookST_triggerPush;
-				case TRIGGER_TELEPORT:          f = hookST_triggerTeleport;
-				case TRIGGER_TELEPORT_RELATIVE: f = hookST_triggerTeleportRelative;
-				default: break;
+				if (StrEqual(className, g_NAMES[i]))
+				{
+					type = i;
+				}
 			}
+		}
 
-			if (hooked)
-			{
-				SetEntData(ent, g_iOffsetMFEffects, GetEntData(ent, g_iOffsetMFEffects) & ~EF_NODRAW);
-				ChangeEdictState(ent, g_iOffsetMFEffects);
-				SetEdictFlags(ent, GetEdictFlags(ent) & ~FL_EDICT_DONTSEND);
-				SDKHook(ent, SDKHook_SetTransmit, f);
-			}
-			else
-			{
-				SetEntData(ent, g_iOffsetMFEffects, GetEntData(ent, g_iOffsetMFEffects) | EF_NODRAW);
-				ChangeEdictState(ent, g_iOffsetMFEffects);
-				SetEdictFlags(ent, GetEdictFlags(ent) | FL_EDICT_DONTSEND);
-				SDKUnhook(ent, SDKHook_SetTransmit, f);
-			}
-
-			break;
+		if (type != -1)
+		{
+			SetBrushVisible(ent, type, transmit);
 		}
 	}
+}
+
+void SetBrushVisible(int ent, int type, bool visible)
+{
+	SDKHookCB f = INVALID_FUNCTION;
+	switch (type)
+	{
+		case TRIGGER_MULTIPLE:          f = hookST_triggerMultiple;
+		case TRIGGER_PUSH:              f = hookST_triggerPush;
+		case TRIGGER_TELEPORT:          f = hookST_triggerTeleport;
+		case TRIGGER_TELEPORT_RELATIVE: f = hookST_triggerTeleportRelative;
+	}
+
+	if (visible)
+	{
+		SetEntData(ent, g_iOffsetMFEffects, GetEntData(ent, g_iOffsetMFEffects) & ~EF_NODRAW);
+		ChangeEdictState(ent, g_iOffsetMFEffects);
+		SetEdictFlags(ent, GetEdictFlags(ent) & ~FL_EDICT_DONTSEND);
+		SDKHook(ent, SDKHook_SetTransmit, f);
+	}
+	else
+	{
+		SetEntData(ent, g_iOffsetMFEffects, GetEntData(ent, g_iOffsetMFEffects) | EF_NODRAW);
+		ChangeEdictState(ent, g_iOffsetMFEffects);
+		SetEdictFlags(ent, GetEdictFlags(ent) | FL_EDICT_DONTSEND);
+		SDKUnhook(ent, SDKHook_SetTransmit, f);
+	}
+}
+
+int TriggerOf(int entity)
+{
+	return g_iProxyTrigger[entity] != -1 ? g_iProxyTrigger[entity] : entity;
 }
 
 char[] IntToStringEx(int value)
@@ -1079,7 +1117,7 @@ void ResetTriggerColor(int entity)
 
 void ColorTriggerMultiple(int entity)
 {
-	switch (g_iMultipleKind[entity])
+	switch (g_iMultipleKind[TriggerOf(entity)])
 	{
 		case MULTIPLE_GRAVITY_40:   SetEntityRenderColor(entity, 255, 100, 0, 255);
 		case MULTIPLE_GRAVITY_NEG:  SetEntityRenderColor(entity, 0, 255, 185, 255);
@@ -1092,12 +1130,13 @@ void ColorTriggerMultiple(int entity)
 
 public Action hookST_triggerMultiple(int entity, int client)
 {
+	int trigger = TriggerOf(entity);
 	// Not enabled for this client
 	if (!g_bTypeEnabled[client][TRIGGER_MULTIPLE])
 		return Plugin_Handled;
 
 	// Selected triggers are always shown yellow in selection mode
-	if (g_bSelectMode[client] && g_SelectedTriggers[client].FindValue(entity) != -1)
+	if (g_bSelectMode[client] && g_SelectedTriggers[client].FindValue(trigger) != -1)
 	{
 		SetEntityRenderMode(entity, RENDER_TRANSCOLOR);
 		SetEntityRenderColor(entity, 255, 255, 0, 200);
@@ -1105,7 +1144,7 @@ public Action hookST_triggerMultiple(int entity, int client)
 	}
 
 	// The highlighted trigger is shown cyan
-	if (g_bSelectMode[client] && g_iHighlightedTrigger[client] == entity)
+	if (g_bSelectMode[client] && g_iHighlightedTrigger[client] == trigger)
 	{
 		SetEntityRenderMode(entity, RENDER_TRANSCOLOR);
 		SetEntityRenderColor(entity, 0, 255, 255, 200);
@@ -1113,7 +1152,7 @@ public Action hookST_triggerMultiple(int entity, int client)
 	}
 
 	// With a confirmed selection, hide the unselected triggers
-	if (g_bUseSelectionMode[client] && g_SelectedTriggers[client].FindValue(entity) == -1)
+	if (g_bUseSelectionMode[client] && g_SelectedTriggers[client].FindValue(trigger) == -1)
 		return Plugin_Handled;
 
 	// Normal coloring
@@ -1123,12 +1162,13 @@ public Action hookST_triggerMultiple(int entity, int client)
 
 public Action hookST_triggerPush(int entity, int client)
 {
+	int trigger = TriggerOf(entity);
 	// Not enabled for this client
 	if (!g_bTypeEnabled[client][TRIGGER_PUSH])
 		return Plugin_Handled;
 
 	// Selected triggers are always shown yellow in selection mode
-	if (g_bSelectMode[client] && g_SelectedTriggers[client].FindValue(entity) != -1)
+	if (g_bSelectMode[client] && g_SelectedTriggers[client].FindValue(trigger) != -1)
 	{
 		SetEntityRenderMode(entity, RENDER_TRANSCOLOR);
 		SetEntityRenderColor(entity, 255, 255, 0, 200);
@@ -1136,7 +1176,7 @@ public Action hookST_triggerPush(int entity, int client)
 	}
 
 	// The highlighted trigger is shown cyan
-	if (g_bSelectMode[client] && g_iHighlightedTrigger[client] == entity)
+	if (g_bSelectMode[client] && g_iHighlightedTrigger[client] == trigger)
 	{
 		SetEntityRenderMode(entity, RENDER_TRANSCOLOR);
 		SetEntityRenderColor(entity, 0, 255, 255, 200);
@@ -1144,7 +1184,7 @@ public Action hookST_triggerPush(int entity, int client)
 	}
 
 	// With a confirmed selection, hide the unselected triggers
-	if (g_bUseSelectionMode[client] && g_SelectedTriggers[client].FindValue(entity) == -1)
+	if (g_bUseSelectionMode[client] && g_SelectedTriggers[client].FindValue(trigger) == -1)
 		return Plugin_Handled;
 
 	// Normal coloring
@@ -1154,12 +1194,13 @@ public Action hookST_triggerPush(int entity, int client)
 
 public Action hookST_triggerTeleport(int entity, int client)
 {
+	int trigger = TriggerOf(entity);
 	// Not enabled for this client
 	if (!g_bTypeEnabled[client][TRIGGER_TELEPORT])
 		return Plugin_Handled;
 
 	// Selected triggers are always shown yellow in selection mode
-	if (g_bSelectMode[client] && g_SelectedTriggers[client].FindValue(entity) != -1)
+	if (g_bSelectMode[client] && g_SelectedTriggers[client].FindValue(trigger) != -1)
 	{
 		SetEntityRenderMode(entity, RENDER_TRANSCOLOR);
 		SetEntityRenderColor(entity, 255, 255, 0, 200);
@@ -1167,7 +1208,7 @@ public Action hookST_triggerTeleport(int entity, int client)
 	}
 
 	// The highlighted trigger is shown cyan
-	if (g_bSelectMode[client] && g_iHighlightedTrigger[client] == entity)
+	if (g_bSelectMode[client] && g_iHighlightedTrigger[client] == trigger)
 	{
 		SetEntityRenderMode(entity, RENDER_TRANSCOLOR);
 		SetEntityRenderColor(entity, 0, 255, 255, 200);
@@ -1175,7 +1216,7 @@ public Action hookST_triggerTeleport(int entity, int client)
 	}
 
 	// With a confirmed selection, hide the unselected triggers
-	if (g_bUseSelectionMode[client] && g_SelectedTriggers[client].FindValue(entity) == -1)
+	if (g_bUseSelectionMode[client] && g_SelectedTriggers[client].FindValue(trigger) == -1)
 		return Plugin_Handled;
 
 	// Normal coloring
@@ -1185,12 +1226,13 @@ public Action hookST_triggerTeleport(int entity, int client)
 
 public Action hookST_triggerTeleportRelative(int entity, int client)
 {
+	int trigger = TriggerOf(entity);
 	// Not enabled for this client
 	if (!g_bTypeEnabled[client][TRIGGER_TELEPORT_RELATIVE])
 		return Plugin_Handled;
 
 	// Selected triggers are always shown yellow in selection mode
-	if (g_bSelectMode[client] && g_SelectedTriggers[client].FindValue(entity) != -1)
+	if (g_bSelectMode[client] && g_SelectedTriggers[client].FindValue(trigger) != -1)
 	{
 		SetEntityRenderMode(entity, RENDER_TRANSCOLOR);
 		SetEntityRenderColor(entity, 255, 255, 0, 200);
@@ -1198,7 +1240,7 @@ public Action hookST_triggerTeleportRelative(int entity, int client)
 	}
 
 	// The highlighted trigger is shown cyan
-	if (g_bSelectMode[client] && g_iHighlightedTrigger[client] == entity)
+	if (g_bSelectMode[client] && g_iHighlightedTrigger[client] == trigger)
 	{
 		SetEntityRenderMode(entity, RENDER_TRANSCOLOR);
 		SetEntityRenderColor(entity, 0, 255, 255, 200);
@@ -1206,7 +1248,7 @@ public Action hookST_triggerTeleportRelative(int entity, int client)
 	}
 
 	// With a confirmed selection, hide the unselected triggers
-	if (g_bUseSelectionMode[client] && g_SelectedTriggers[client].FindValue(entity) == -1)
+	if (g_bUseSelectionMode[client] && g_SelectedTriggers[client].FindValue(trigger) == -1)
 		return Plugin_Handled;
 
 	// Normal coloring
@@ -1221,4 +1263,862 @@ stock bool IsValidClient(int client, bool nobots = true)
         return false;
     }
     return IsClientInGame(client);
+}
+
+#define BSP_IDENT        0x50534256
+#define MODEL_VERSION    "2"
+#define LUMP_PLANES      1
+#define LUMP_NODES       5
+#define LUMP_LEAFS       10
+#define LUMP_MODELS      14
+#define LUMP_LEAFBRUSHES 17
+#define LUMP_BRUSHES     18
+#define LUMP_BRUSHSIDES  19
+
+#define MAX_POLY_POINTS 128
+#define MAX_BRUSH_SIDES 256
+#define BOGUS_RANGE     32768.0
+#define CLIP_EPSILON    0.01
+
+ArrayList g_PolyVerts;
+ArrayList g_Polys;
+ArrayList g_ModelPolys;
+
+float g_PolyA[MAX_POLY_POINTS][3];
+float g_PolyB[MAX_POLY_POINTS][3];
+int g_LumpScratch[1024];
+
+void BuildFacelessTriggerModel()
+{
+	delete g_FacelessModels;
+	g_FacelessModels = new ArrayList();
+	g_sModelPath[0] = '\0';
+
+	char map[PLATFORM_MAX_PATH], path[PLATFORM_MAX_PATH];
+	GetCurrentMap(map, sizeof map);
+	Format(path, sizeof path, "maps/%s.bsp", map);
+
+	File f = OpenFile(path, "rb", true, "GAME");
+	if (f == null)
+	{
+		return;
+	}
+
+	int ident, version, lumpOfs[64], lumpLen[64], lumpVer[64], entry[4];
+	ReadFileCell(f, ident, 4);
+	ReadFileCell(f, version, 4);
+	if (ident != BSP_IDENT)
+	{
+		delete f;
+		return;
+	}
+	for (int i = 0; i < 64; i++)
+	{
+		ReadFile(f, entry, 4, 4);
+		lumpOfs[i] = entry[0];
+		lumpLen[i] = entry[1];
+		lumpVer[i] = entry[2];
+	}
+
+	ArrayList models = ReadLump(f, lumpOfs[LUMP_MODELS], lumpLen[LUMP_MODELS], 12, 4);
+	ArrayList planes = ReadLump(f, lumpOfs[LUMP_PLANES], lumpLen[LUMP_PLANES], 5, 4);
+	ArrayList brushes = ReadLump(f, lumpOfs[LUMP_BRUSHES], lumpLen[LUMP_BRUSHES], 3, 4);
+	ArrayList sides = ReadLump(f, lumpOfs[LUMP_BRUSHSIDES], lumpLen[LUMP_BRUSHSIDES], 4, 2);
+	ArrayList nodes = ReadLump(f, lumpOfs[LUMP_NODES], lumpLen[LUMP_NODES], 8, 4);
+	ArrayList leafs = ReadLump(f, lumpOfs[LUMP_LEAFS], lumpLen[LUMP_LEAFS], lumpVer[LUMP_LEAFS] == 0 ? 14 : 8, 4);
+	ArrayList leafBrushes = ReadLump(f, lumpOfs[LUMP_LEAFBRUSHES], lumpLen[LUMP_LEAFBRUSHES], 1, 2);
+	delete f;
+
+	g_PolyVerts = new ArrayList(3);
+	g_Polys = new ArrayList(2);
+	g_ModelPolys = new ArrayList(2);
+
+	if (models != null && planes != null && brushes != null && sides != null && nodes != null && leafs != null && leafBrushes != null)
+	{
+		char buffer[64];
+		int model[12];
+		int length = EntityLump.Length();
+		for (int i = 0; i < length; i++)
+		{
+			EntityLumpEntry ent = EntityLump.Get(i);
+			ent.GetNextKey("classname", buffer, sizeof buffer);
+			bool wanted = false;
+			for (int type = 0; type < MAX_TYPES; type++)
+			{
+				wanted = wanted || StrEqual(buffer, g_NAMES[type]);
+			}
+			ent.GetNextKey("model", buffer, sizeof buffer);
+			delete ent;
+
+			if (!wanted || buffer[0] != '*')
+			{
+				continue;
+			}
+			int modelIndex = StringToInt(buffer[1]);
+			if (modelIndex <= 0 || modelIndex >= models.Length)
+			{
+				continue;
+			}
+			models.GetArray(modelIndex, model, sizeof model);
+			if (model[11] != 0)
+			{
+				continue;
+			}
+
+			int firstPoly = g_Polys.Length;
+			AddModelPolys(model[9], planes, brushes, sides, nodes, leafs, leafBrushes);
+			if (g_Polys.Length > firstPoly)
+			{
+				int range[2];
+				range[0] = firstPoly;
+				range[1] = g_Polys.Length - firstPoly;
+				g_ModelPolys.PushArray(range);
+				g_FacelessModels.Push(modelIndex);
+			}
+		}
+	}
+
+	delete models;
+	delete planes;
+	delete brushes;
+	delete sides;
+	delete nodes;
+	delete leafs;
+	delete leafBrushes;
+
+	if (g_FacelessModels.Length > 0)
+	{
+		ReplaceString(map, sizeof map, "/", "_");
+		if (WriteTriggerModel(map))
+		{
+			AddFileToDownloadsTable(g_sModelPath);
+			strcopy(path, sizeof path, g_sModelPath);
+			ReplaceString(path, sizeof path, ".mdl", ".vvd");
+			AddFileToDownloadsTable(path);
+			ReplaceString(path, sizeof path, ".vvd", ".dx90.vtx");
+			AddFileToDownloadsTable(path);
+			AddFileToDownloadsTable("materials/supershowtriggers/trigger" ... MODEL_VERSION ... ".vmt");
+			PrecacheModel(g_sModelPath, true);
+			PrintToServer("%d faceless trigger models in %s", g_FacelessModels.Length, g_sModelPath);
+		}
+	}
+
+	delete g_PolyVerts;
+	delete g_Polys;
+	delete g_ModelPolys;
+}
+
+ArrayList ReadLump(File f, int ofs, int len, int cells, int cellSize)
+{
+	int count = len / (cells * cellSize);
+	ArrayList list = new ArrayList(cells);
+	FileSeek(f, ofs, SEEK_SET);
+
+	int perBatch = sizeof g_LumpScratch / cells;
+	while (count > 0)
+	{
+		int batch = count < perBatch ? count : perBatch;
+		if (ReadFile(f, g_LumpScratch, batch * cells, cellSize) != batch * cells)
+		{
+			delete list;
+			return null;
+		}
+		for (int i = 0; i < batch; i++)
+		{
+			list.PushArray(g_LumpScratch[i * cells], cells);
+		}
+		count -= batch;
+	}
+	return list;
+}
+
+void AddModelPolys(int headnode, ArrayList planes, ArrayList brushes, ArrayList sides, ArrayList nodes, ArrayList leafs, ArrayList leafBrushes)
+{
+	ArrayList stack = new ArrayList();
+	ArrayList done = new ArrayList();
+	stack.Push(headnode);
+
+	int node[8], brush[3], side[4], planeNums[MAX_BRUSH_SIDES];
+	while (stack.Length > 0)
+	{
+		int n = stack.Get(stack.Length - 1);
+		stack.Erase(stack.Length - 1);
+
+		if (n >= 0)
+		{
+			if (n >= nodes.Length)
+			{
+				continue;
+			}
+			nodes.GetArray(n, node, sizeof node);
+			stack.Push(node[1]);
+			stack.Push(node[2]);
+			continue;
+		}
+
+		int leaf = -1 - n;
+		if (leaf >= leafs.Length)
+		{
+			continue;
+		}
+		int packed = leafs.Get(leaf, 6);
+		int first = packed & 0xFFFF;
+		int num = (packed >>> 16) & 0xFFFF;
+
+		for (int i = first; i < first + num && i < leafBrushes.Length; i++)
+		{
+			int b = leafBrushes.Get(i);
+			if (b >= brushes.Length || done.FindValue(b) != -1)
+			{
+				continue;
+			}
+			done.Push(b);
+			brushes.GetArray(b, brush, sizeof brush);
+
+			int planeCount = 0;
+			for (int s = brush[0]; s < brush[0] + brush[1] && s < sides.Length && planeCount < MAX_BRUSH_SIDES; s++)
+			{
+				sides.GetArray(s, side, sizeof side);
+				if (side[3] == 0 && side[0] < planes.Length)
+				{
+					planeNums[planeCount++] = side[0];
+				}
+			}
+
+			for (int p = 0; p < planeCount; p++)
+			{
+				int count = BuildFace(planes, planeNums, planeCount, p);
+				if (count < 3)
+				{
+					continue;
+				}
+				int range[2];
+				range[0] = g_PolyVerts.Length;
+				range[1] = count;
+				for (int v = 0; v < count; v++)
+				{
+					g_PolyVerts.PushArray(g_PolyA[v]);
+				}
+				g_Polys.PushArray(range);
+			}
+		}
+	}
+
+	delete stack;
+	delete done;
+}
+
+int BuildFace(ArrayList planes, const int[] planeNums, int planeCount, int faceIndex)
+{
+	float plane[4];
+	planes.GetArray(planeNums[faceIndex], plane, 4);
+
+	float normal[3];
+	normal[0] = plane[0];
+	normal[1] = plane[1];
+	normal[2] = plane[2];
+
+	int count = BaseWinding(normal, plane[3]);
+
+	for (int i = 0; i < planeCount && count >= 3; i++)
+	{
+		if (i == faceIndex)
+			continue;
+
+		float clip[4];
+		planes.GetArray(planeNums[i], clip, 4);
+		count = ChopWinding(count, clip);
+	}
+
+	return count;
+}
+
+int BaseWinding(const float normal[3], float dist)
+{
+	int major = 0;
+	float best = -1.0;
+
+	for (int i = 0; i < 3; i++)
+	{
+		float v = FloatAbs(normal[i]);
+		if (v > best)
+		{
+			best = v;
+			major = i;
+		}
+	}
+
+	float up[3];
+	if (major == 2)
+		up[0] = 1.0;
+	else
+		up[2] = 1.0;
+
+	float d = GetVectorDotProduct(up, normal);
+	for (int i = 0; i < 3; i++)
+		up[i] -= d * normal[i];
+	NormalizeVector(up, up);
+
+	float org[3];
+	for (int i = 0; i < 3; i++)
+		org[i] = normal[i] * dist;
+
+	float right[3];
+	GetVectorCrossProduct(up, normal, right);
+
+	for (int i = 0; i < 3; i++)
+	{
+		up[i] *= BOGUS_RANGE;
+		right[i] *= BOGUS_RANGE;
+	}
+
+	for (int i = 0; i < 3; i++)
+	{
+		g_PolyA[0][i] = org[i] + up[i] - right[i];
+		g_PolyA[1][i] = org[i] + up[i] + right[i];
+		g_PolyA[2][i] = org[i] - up[i] + right[i];
+		g_PolyA[3][i] = org[i] - up[i] - right[i];
+	}
+
+	return 4;
+}
+
+int ChopWinding(int count, const float plane[4])
+{
+	float dists[MAX_POLY_POINTS];
+	float normal[3];
+	normal[0] = plane[0];
+	normal[1] = plane[1];
+	normal[2] = plane[2];
+
+	for (int i = 0; i < count; i++)
+		dists[i] = GetVectorDotProduct(g_PolyA[i], normal) - plane[3];
+
+	int out = 0;
+
+	for (int i = 0; i < count; i++)
+	{
+		int j = (i + 1) % count;
+
+		if (dists[i] <= CLIP_EPSILON)
+		{
+			if (out >= MAX_POLY_POINTS)
+				return 0;
+			g_PolyB[out][0] = g_PolyA[i][0];
+			g_PolyB[out][1] = g_PolyA[i][1];
+			g_PolyB[out][2] = g_PolyA[i][2];
+			out++;
+		}
+
+		bool crosses = (dists[i] > CLIP_EPSILON && dists[j] < -CLIP_EPSILON)
+					|| (dists[i] < -CLIP_EPSILON && dists[j] > CLIP_EPSILON);
+
+		if (!crosses)
+			continue;
+
+		if (out >= MAX_POLY_POINTS)
+			return 0;
+
+		float t = dists[i] / (dists[i] - dists[j]);
+		for (int a = 0; a < 3; a++)
+			g_PolyB[out][a] = g_PolyA[i][a] + t * (g_PolyA[j][a] - g_PolyA[i][a]);
+		out++;
+	}
+
+	for (int i = 0; i < out; i++)
+	{
+		g_PolyA[i][0] = g_PolyB[i][0];
+		g_PolyA[i][1] = g_PolyB[i][1];
+		g_PolyA[i][2] = g_PolyB[i][2];
+	}
+
+	return out;
+}
+
+void SpawnProxyIfFaceless(int trigger, int type)
+{
+	if (g_sModelPath[0] == '\0')
+	{
+		return;
+	}
+
+	char modelName[16];
+	GetEntPropString(trigger, Prop_Data, "m_ModelName", modelName, sizeof modelName);
+	if (modelName[0] != '*')
+	{
+		return;
+	}
+	int body = g_FacelessModels.FindValue(StringToInt(modelName[1]));
+	if (body == -1)
+	{
+		return;
+	}
+
+	int prop = CreateEntityByName("prop_dynamic_override");
+	if (prop == -1)
+	{
+		return;
+	}
+	DispatchKeyValue(prop, "model", g_sModelPath);
+	DispatchKeyValue(prop, "solid", "0");
+	DispatchKeyValue(prop, "disableshadows", "1");
+	DispatchKeyValue(prop, "disablereceiveshadows", "1");
+
+	float origin[3], mins[3], maxs[3];
+	GetEntPropVector(trigger, Prop_Send, "m_vecOrigin", origin);
+	TeleportEntity(prop, origin, NULL_VECTOR, NULL_VECTOR);
+	DispatchSpawn(prop);
+
+	SetEntProp(prop, Prop_Send, "m_nBody", body);
+
+	GetEntPropVector(trigger, Prop_Data, "m_vecMins", mins);
+	GetEntPropVector(trigger, Prop_Data, "m_vecMaxs", maxs);
+	SetEntPropVector(prop, Prop_Send, "m_vecMins", mins);
+	SetEntPropVector(prop, Prop_Send, "m_vecMaxs", maxs);
+
+	g_iProxyTrigger[prop] = trigger;
+	g_iProxyType[prop] = type;
+	SetBrushVisible(prop, type, g_bHooked);
+}
+
+bool WriteTriggerModel(const char[] map)
+{
+	int n = g_ModelPolys.Length;
+	int[] numVerts = new int[n];
+	int[] numTris = new int[n];
+	int[] vertBase = new int[n];
+	int[] indexBase = new int[n];
+	int totalVerts, totalIndices;
+	int checksum = StringToInt(MODEL_VERSION);
+	float bmin[3] = {1.0e30, ...}, bmax[3] = {-1.0e30, ...}, point[3];
+	int range[2], poly[2];
+
+	for (int i = 0; i < n; i++)
+	{
+		vertBase[i] = totalVerts;
+		indexBase[i] = totalIndices;
+		g_ModelPolys.GetArray(i, range);
+		for (int p = range[0]; p < range[0] + range[1]; p++)
+		{
+			g_Polys.GetArray(p, poly);
+			numVerts[i] += poly[1];
+			numTris[i] += poly[1] - 2;
+			for (int v = poly[0]; v < poly[0] + poly[1]; v++)
+			{
+				g_PolyVerts.GetArray(v, point);
+				for (int k = 0; k < 3; k++)
+				{
+					checksum = ((checksum << 1) | (checksum >>> 31)) ^ view_as<int>(point[k]);
+					if (point[k] < bmin[k]) bmin[k] = point[k];
+					if (point[k] > bmax[k]) bmax[k] = point[k];
+				}
+			}
+		}
+		totalVerts += numVerts[i];
+		totalIndices += numTris[i] * 3;
+	}
+	if (totalVerts == 0 || totalVerts > 65535)
+	{
+		return false;
+	}
+	for (int k = 0; k < 3; k++)
+	{
+		bmin[k] -= 1.0;
+		bmax[k] += 1.0;
+	}
+
+	char base[PLATFORM_MAX_PATH], path[PLATFORM_MAX_PATH], mdlName[64];
+	Format(base, sizeof base, "models/supershowtriggers/%s_%08x", map, checksum);
+	Format(mdlName, sizeof mdlName, "supershowtriggers/%s_%08x.mdl", map, checksum);
+	Format(path, sizeof path, "%s.dx90.vtx", base);
+	if (FileExists(path, true, "GAME"))
+	{
+		Format(g_sModelPath, sizeof g_sModelPath, "%s.mdl", base);
+		return true;
+	}
+	CreateDirectory("models", FPERM_U_READ|FPERM_U_WRITE|FPERM_U_EXEC|FPERM_G_READ|FPERM_G_EXEC|FPERM_O_READ|FPERM_O_EXEC, true, "DEFAULT_WRITE_PATH");
+	CreateDirectory("models/supershowtriggers", FPERM_U_READ|FPERM_U_WRITE|FPERM_U_EXEC|FPERM_G_READ|FPERM_G_EXEC|FPERM_O_READ|FPERM_O_EXEC, true, "DEFAULT_WRITE_PATH");
+
+	int OFF_HDR2 = 408;
+	int OFF_BONE = OFF_HDR2 + 256;
+	int OFF_HITBOXSET = OFF_BONE + 216;
+	int OFF_BBOX = OFF_HITBOXSET + 12;
+	int OFF_BONETABLE = OFF_BBOX + 68;
+	int OFF_ANIMDESC = OFF_BONETABLE + 4;
+	int OFF_ANIMDATA = (OFF_ANIMDESC + 100 + 15) & ~15;
+	int OFF_SEQDESC = OFF_ANIMDATA + 12;
+	int OFF_SEQ_WEIGHTS = OFF_SEQDESC + 212;
+	int OFF_SEQ_ANIMIDX = OFF_SEQ_WEIGHTS + 4;
+	int OFF_BODYPART = OFF_SEQ_ANIMIDX + 4;
+	int OFF_MODELS = OFF_BODYPART + 16;
+	int OFF_MESHES = OFF_MODELS + 148 * n;
+	int OFF_TEXTURE = OFF_MESHES + 116 * n;
+	int OFF_CDTEXTURE = OFF_TEXTURE + 64;
+	int OFF_SKIN = OFF_CDTEXTURE + 4;
+	int OFF_STRINGS = OFF_SKIN + 4;
+
+	static const char strings[][] = { "default", "static_prop", "@idle", "idle", "body" };
+	static const char material[] = "trigger" ... MODEL_VERSION;
+	int STR_NAME = OFF_STRINGS + 1;
+	int STR_DEFAULT = STR_NAME + strlen(mdlName) + 1;
+	int STR_STATICPROP = STR_DEFAULT + 8;
+	int STR_IDLEANIM = STR_STATICPROP + 12;
+	int STR_IDLE = STR_IDLEANIM + 6;
+	int STR_BODY = STR_IDLE + 5;
+	int STR_TRIGGER = STR_BODY + 5;
+	int STR_CDTEXTURE = STR_TRIGGER + sizeof material;
+	int MDL_LENGTH = (STR_CDTEXTURE + 19 + 3) & ~3;
+
+	Format(path, sizeof path, "%s.mdl", base);
+	File f = OpenFile(path, "wb", true, "DEFAULT_WRITE_PATH");
+	if (f == null)
+	{
+		return false;
+	}
+
+	WriteInt(f, 0x54534449);
+	WriteInt(f, 48);
+	WriteInt(f, checksum);
+	WritePaddedString(f, mdlName, 64);
+	WriteInt(f, MDL_LENGTH);
+	WriteFloat(f, 0.0); WriteFloat(f, 0.0); WriteFloat(f, 0.0);
+	for (int k = 0; k < 3; k++) WriteFloat(f, (bmin[k] + bmax[k]) * 0.5);
+	WriteVec(f, bmin); WriteVec(f, bmax);
+	WriteVec(f, bmin); WriteVec(f, bmax);
+	WriteInt(f, 1);
+	WriteInt(f, 1); WriteInt(f, OFF_BONE);
+	WriteInt(f, 0); WriteInt(f, OFF_HITBOXSET);
+	WriteInt(f, 1); WriteInt(f, OFF_HITBOXSET);
+	WriteInt(f, 1); WriteInt(f, OFF_ANIMDESC);
+	WriteInt(f, 1); WriteInt(f, OFF_SEQDESC);
+	WriteInt(f, 0); WriteInt(f, 0);
+	WriteInt(f, 1); WriteInt(f, OFF_TEXTURE);
+	WriteInt(f, 1); WriteInt(f, OFF_CDTEXTURE);
+	WriteInt(f, 1); WriteInt(f, 1); WriteInt(f, OFF_SKIN);
+	WriteInt(f, 1); WriteInt(f, OFF_BODYPART);
+	WriteInt(f, 0); WriteInt(f, OFF_HITBOXSET);
+	WriteInt(f, 0); WriteInt(f, OFF_BODYPART); WriteInt(f, OFF_BODYPART);
+	for (int k = 0; k < 6; k++) { WriteInt(f, 0); WriteInt(f, OFF_MESHES); }
+	WriteInt(f, STR_DEFAULT);
+	WriteInt(f, OFF_STRINGS); WriteInt(f, 0);
+	WriteInt(f, 0); WriteInt(f, OFF_MESHES);
+	WriteFloat(f, 1.0); WriteInt(f, 1);
+	WriteInt(f, 0); WriteInt(f, OFF_TEXTURE);
+	WriteInt(f, 0);
+	WriteInt(f, OFF_STRINGS); WriteInt(f, 0); WriteInt(f, OFF_TEXTURE);
+	WriteInt(f, 0);
+	WriteInt(f, OFF_BONETABLE);
+	WriteInt(f, 0); WriteInt(f, 0);
+	WriteInt(f, 0);
+	WriteInt(f, 0);
+	WriteInt(f, 0); WriteInt(f, OFF_MESHES);
+	WriteFloat(f, 0.0);
+	WriteInt(f, 0);
+	WriteInt(f, OFF_HDR2);
+	WriteInt(f, 0);
+
+	WriteInt(f, 0); WriteInt(f, OFF_STRINGS);
+	WriteInt(f, 0); WriteFloat(f, 0.0);
+	WriteInt(f, 0); WriteInt(f, STR_NAME - OFF_HDR2);
+	WriteInt(f, 0); WriteInt(f, 0);
+	WriteZeros(f, 256 - 32);
+
+	WriteInt(f, STR_STATICPROP - OFF_BONE); WriteInt(f, -1);
+	for (int k = 0; k < 6; k++) WriteInt(f, -1);
+	for (int k = 0; k < 3; k++) WriteFloat(f, 0.0);
+	WriteFloat(f, 0.0); WriteFloat(f, 0.0); WriteFloat(f, 0.0); WriteFloat(f, 1.0);
+	for (int k = 0; k < 3; k++) WriteFloat(f, 0.0);
+	for (int k = 0; k < 6; k++) WriteFloat(f, 1.0 / 32.0);
+	for (int k = 0; k < 12; k++) WriteFloat(f, (k == 0 || k == 5 || k == 10) ? 1.0 : 0.0);
+	for (int k = 0; k < 4; k++) WriteFloat(f, 0.0);
+	WriteInt(f, 0x500); WriteInt(f, 0); WriteInt(f, 0); WriteInt(f, 0);
+	WriteInt(f, STR_DEFAULT - OFF_BONE); WriteInt(f, 1);
+	WriteZeros(f, 32);
+
+	WriteInt(f, STR_DEFAULT - OFF_HITBOXSET); WriteInt(f, 1); WriteInt(f, 12);
+	WriteInt(f, 0); WriteInt(f, 0); WriteVec(f, bmin); WriteVec(f, bmax);
+	WriteInt(f, OFF_STRINGS - OFF_BBOX);
+	WriteZeros(f, 32);
+
+	WriteInt(f, 0);
+
+	WriteInt(f, -OFF_ANIMDESC); WriteInt(f, STR_IDLEANIM - OFF_ANIMDESC);
+	WriteFloat(f, 30.0); WriteInt(f, 0); WriteInt(f, 1);
+	WriteInt(f, 0); WriteInt(f, 0);
+	WriteZeros(f, 24);
+	WriteInt(f, 0); WriteInt(f, OFF_ANIMDATA - OFF_ANIMDESC);
+	for (int k = 0; k < 7; k++) WriteInt(f, 0);
+	WriteInt(f, 0); WriteInt(f, 0); WriteFloat(f, 0.0);
+	WriteZeros(f, OFF_ANIMDATA - (OFF_ANIMDESC + 100));
+
+	WriteInt(f, 0x2000);
+	WriteInt(f, 0x00100000); WriteInt(f, 0x40000200);
+
+	WriteInt(f, -OFF_SEQDESC); WriteInt(f, STR_IDLE - OFF_SEQDESC); WriteInt(f, OFF_STRINGS - OFF_SEQDESC);
+	WriteInt(f, 0); WriteInt(f, -1); WriteInt(f, 0);
+	WriteInt(f, 0); WriteInt(f, 212);
+	WriteVec(f, bmin); WriteVec(f, bmax);
+	WriteInt(f, 1); WriteInt(f, OFF_SEQ_ANIMIDX - OFF_SEQDESC); WriteInt(f, 0);
+	WriteInt(f, 1); WriteInt(f, 1); WriteInt(f, -1); WriteInt(f, -1);
+	for (int k = 0; k < 4; k++) WriteFloat(f, 0.0);
+	WriteInt(f, 0);
+	WriteFloat(f, 0.2); WriteFloat(f, 0.2);
+	WriteInt(f, 0); WriteInt(f, 0); WriteInt(f, 0);
+	WriteFloat(f, 0.0); WriteFloat(f, 0.0); WriteFloat(f, 0.0);
+	WriteInt(f, 0); WriteInt(f, 0); WriteInt(f, 0);
+	WriteInt(f, 0); WriteInt(f, 212);
+	WriteInt(f, OFF_SEQ_WEIGHTS - OFF_SEQDESC);
+	WriteInt(f, 0);
+	WriteInt(f, 0); WriteInt(f, OFF_SEQ_ANIMIDX - OFF_SEQDESC);
+	WriteInt(f, OFF_BODYPART - OFF_SEQDESC); WriteInt(f, 0);
+	WriteInt(f, 0);
+	WriteZeros(f, 28);
+	WriteFloat(f, 1.0);
+	WriteInt(f, 0);
+
+	WriteInt(f, STR_BODY - OFF_BODYPART); WriteInt(f, n); WriteInt(f, 1); WriteInt(f, 16);
+
+	char modelName[64];
+	for (int i = 0; i < n; i++)
+	{
+		int offModel = OFF_MODELS + 148 * i;
+		Format(modelName, sizeof modelName, "trigger%d", i);
+		WritePaddedString(f, modelName, 64);
+		WriteInt(f, 0); WriteFloat(f, 0.0);
+		WriteInt(f, 1); WriteInt(f, OFF_MESHES + 116 * i - offModel);
+		WriteInt(f, numVerts[i]); WriteInt(f, vertBase[i] * 48); WriteInt(f, vertBase[i] * 16);
+		WriteInt(f, 0); WriteInt(f, 0);
+		WriteInt(f, 0); WriteInt(f, OFF_MESHES + 116 * (i + 1) - offModel);
+		WriteZeros(f, 40);
+	}
+
+	for (int i = 0; i < n; i++)
+	{
+		WriteInt(f, 0); WriteInt(f, OFF_MODELS + 148 * i - (OFF_MESHES + 116 * i));
+		WriteInt(f, numVerts[i]); WriteInt(f, 0);
+		WriteInt(f, 0); WriteInt(f, 0); WriteInt(f, 0); WriteInt(f, 0);
+		WriteInt(f, i);
+		WriteFloat(f, 0.0); WriteFloat(f, 0.0); WriteFloat(f, 0.0);
+		WriteInt(f, 0);
+		for (int k = 0; k < 8; k++) WriteInt(f, numVerts[i]);
+		WriteZeros(f, 32);
+	}
+
+	WriteInt(f, STR_TRIGGER - OFF_TEXTURE); WriteZeros(f, 60);
+	WriteInt(f, STR_CDTEXTURE);
+	WriteInt(f, 0);
+
+	WriteFileCell(f, 0, 1);
+	WriteFileString(f, mdlName, true);
+	for (int k = 0; k < sizeof strings; k++)
+	{
+		WriteFileString(f, strings[k], true);
+	}
+	WriteFileString(f, material, true);
+	WriteFileString(f, "supershowtriggers/", true);
+	WriteZeros(f, MDL_LENGTH - (STR_CDTEXTURE + 19));
+	delete f;
+
+	Format(path, sizeof path, "%s.vvd", base);
+	f = OpenFile(path, "wb", true, "DEFAULT_WRITE_PATH");
+	if (f == null)
+	{
+		return false;
+	}
+	WriteInt(f, 0x56534449);
+	WriteInt(f, 4); WriteInt(f, checksum); WriteInt(f, 1);
+	for (int k = 0; k < 8; k++) WriteInt(f, totalVerts);
+	WriteInt(f, 0); WriteInt(f, 64); WriteInt(f, 64); WriteInt(f, 64 + 48 * totalVerts);
+
+	float normal[3], tangent[3];
+	for (int pass = 0; pass < 2; pass++)
+	{
+		for (int p = 0; p < g_Polys.Length; p++)
+		{
+			g_Polys.GetArray(p, poly);
+			PolygonNormal(poly[0], normal);
+			for (int v = poly[0]; v < poly[0] + poly[1]; v++)
+			{
+				g_PolyVerts.GetArray(v, point);
+				if (pass == 0)
+				{
+					WriteFloat(f, 1.0); WriteFloat(f, 0.0); WriteFloat(f, 0.0); WriteInt(f, 0x01000000);
+					WriteVec(f, point);
+					WriteVec(f, normal);
+					WritePlanarUV(f, point, normal);
+				}
+				else
+				{
+					TangentFor(normal, tangent);
+					WriteVec(f, tangent);
+					WriteFloat(f, 1.0);
+				}
+			}
+		}
+	}
+	delete f;
+
+	int OFF_VTX_MODEL = 36 + 8;
+	int OFF_VTX_LOD = OFF_VTX_MODEL + 8 * n;
+	int OFF_VTX_MESH = OFF_VTX_LOD + 12 * n;
+	int OFF_VTX_SG = OFF_VTX_MESH + 9 * n;
+	int OFF_VTX_STRIP = OFF_VTX_SG + 25 * n;
+	int OFF_VTX_VERTS = OFF_VTX_STRIP + 27 * n;
+	int OFF_VTX_INDICES = OFF_VTX_VERTS + 9 * totalVerts;
+	int OFF_VTX_BONECHANGES = OFF_VTX_INDICES + 2 * totalIndices;
+	int OFF_VTX_MATREPLIST = OFF_VTX_BONECHANGES + 8 * n;
+
+	Format(path, sizeof path, "%s.dx90.vtx", base);
+	f = OpenFile(path, "wb", true, "DEFAULT_WRITE_PATH");
+	if (f == null)
+	{
+		return false;
+	}
+	WriteInt(f, 7); WriteInt(f, 24); WriteShort(f, 53); WriteShort(f, 9); WriteInt(f, 3);
+	WriteInt(f, checksum); WriteInt(f, 1); WriteInt(f, OFF_VTX_MATREPLIST);
+	WriteInt(f, 1); WriteInt(f, 36);
+	WriteInt(f, n); WriteInt(f, 8);
+	for (int i = 0; i < n; i++)
+	{
+		WriteInt(f, 1); WriteInt(f, (OFF_VTX_LOD + 12 * i) - (OFF_VTX_MODEL + 8 * i));
+	}
+	for (int i = 0; i < n; i++)
+	{
+		WriteInt(f, 1); WriteInt(f, (OFF_VTX_MESH + 9 * i) - (OFF_VTX_LOD + 12 * i)); WriteFloat(f, 0.0);
+	}
+	for (int i = 0; i < n; i++)
+	{
+		WriteInt(f, 1); WriteInt(f, (OFF_VTX_SG + 25 * i) - (OFF_VTX_MESH + 9 * i)); WriteFileCell(f, 0, 1);
+	}
+	for (int i = 0; i < n; i++)
+	{
+		int offGroup = OFF_VTX_SG + 25 * i;
+		WriteInt(f, numVerts[i]); WriteInt(f, (OFF_VTX_VERTS + 9 * vertBase[i]) - offGroup);
+		WriteInt(f, numTris[i] * 3); WriteInt(f, (OFF_VTX_INDICES + 2 * indexBase[i]) - offGroup);
+		WriteInt(f, 1); WriteInt(f, (OFF_VTX_STRIP + 27 * i) - offGroup); WriteFileCell(f, 2, 1);
+	}
+	for (int i = 0; i < n; i++)
+	{
+		int offStrip = OFF_VTX_STRIP + 27 * i;
+		WriteInt(f, numTris[i] * 3); WriteInt(f, 0); WriteInt(f, numVerts[i]); WriteInt(f, 0);
+		WriteShort(f, 1); WriteFileCell(f, 1, 1);
+		WriteInt(f, 1); WriteInt(f, (OFF_VTX_BONECHANGES + 8 * i) - offStrip);
+	}
+	for (int i = 0; i < n; i++)
+	{
+		for (int k = 0; k < numVerts[i]; k++)
+		{
+			WriteFileCell(f, 0, 1); WriteFileCell(f, 1, 1); WriteFileCell(f, 2, 1); WriteFileCell(f, 1, 1);
+			WriteShort(f, k);
+			WriteFileCell(f, 0, 1); WriteFileCell(f, 0, 1); WriteFileCell(f, 0, 1);
+		}
+	}
+	for (int i = 0; i < n; i++)
+	{
+		g_ModelPolys.GetArray(i, range);
+		int first = 0;
+		for (int p = range[0]; p < range[0] + range[1]; p++)
+		{
+			g_Polys.GetArray(p, poly);
+			for (int k = 1; k < poly[1] - 1; k++)
+			{
+				WriteShort(f, first); WriteShort(f, first + k); WriteShort(f, first + k + 1);
+			}
+			first += poly[1];
+		}
+	}
+	for (int i = 0; i < n; i++)
+	{
+		WriteInt(f, 0); WriteInt(f, 0);
+	}
+	WriteInt(f, 0); WriteInt(f, 0);
+	delete f;
+
+	Format(g_sModelPath, sizeof g_sModelPath, "%s.mdl", base);
+	return true;
+}
+
+void PolygonNormal(int firstVert, float normal[3])
+{
+	float a[3], b[3], c[3], ab[3], ac[3];
+	g_PolyVerts.GetArray(firstVert, a);
+	g_PolyVerts.GetArray(firstVert + 1, b);
+	g_PolyVerts.GetArray(firstVert + 2, c);
+	SubtractVectors(b, a, ab);
+	SubtractVectors(c, a, ac);
+	GetVectorCrossProduct(ab, ac, normal);
+	if (GetVectorLength(normal) < 0.000001)
+	{
+		normal[0] = 0.0; normal[1] = 0.0; normal[2] = 1.0;
+		return;
+	}
+	NormalizeVector(normal, normal);
+}
+
+void TangentFor(const float normal[3], float tangent[3])
+{
+	float axis[3];
+	if (FloatAbs(normal[2]) < 0.9) axis[2] = 1.0;
+	else axis[0] = 1.0;
+	GetVectorCrossProduct(axis, normal, tangent);
+	NormalizeVector(tangent, tangent);
+}
+
+void WritePlanarUV(File f, const float point[3], const float normal[3])
+{
+	float ax = FloatAbs(normal[0]), ay = FloatAbs(normal[1]), az = FloatAbs(normal[2]);
+	if (az >= ax && az >= ay)
+	{
+		WriteFloat(f, point[0] / 16.0); WriteFloat(f, point[1] / 16.0);
+	}
+	else if (ay >= ax)
+	{
+		WriteFloat(f, point[0] / 16.0); WriteFloat(f, point[2] / 16.0);
+	}
+	else
+	{
+		WriteFloat(f, point[1] / 16.0); WriteFloat(f, point[2] / 16.0);
+	}
+}
+
+void WriteVec(File f, const float v[3])
+{
+	WriteFloat(f, v[0]); WriteFloat(f, v[1]); WriteFloat(f, v[2]);
+}
+
+void WriteInt(File f, int value)
+{
+	WriteFileCell(f, value, 4);
+}
+
+void WriteShort(File f, int value)
+{
+	WriteFileCell(f, value & 0xFFFF, 2);
+}
+
+void WriteFloat(File f, float value)
+{
+	WriteFileCell(f, view_as<int>(value), 4);
+}
+
+void WriteZeros(File f, int bytes)
+{
+	for (int i = 0; i < bytes; i++)
+	{
+		WriteFileCell(f, 0, 1);
+	}
+}
+
+void WritePaddedString(File f, const char[] str, int length)
+{
+	int len = strlen(str);
+	if (len > length - 1)
+	{
+		len = length - 1;
+	}
+	for (int i = 0; i < len; i++)
+	{
+		WriteFileCell(f, str[i], 1);
+	}
+	WriteZeros(f, length - len);
 }
