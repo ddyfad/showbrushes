@@ -37,7 +37,7 @@ This plugin is a [Show Triggers](https://github.com/blankbhop/improved-showtrigg
 - SourceMod 1.12 with SDKHooks and SDKTools. The `EntityLump` natives are part of 1.12.
 - The vmt files in `materials/showbrushes/` in the game directory.
 - `addons/sourcemod/gamedata/showbrushes.games.txt`. It contains the netchannel vtable slots and struct offsets. The Linux values are verified against the CS:S build 10897846 client and dedicated server binaries. The Windows values are derived and not verified.
-- `sv_pure 1` with these lines in `cfg/pure_server_whitelist.txt`. Without them the clients do not load the transferred files. With `sv_pure 2` the clients do not load custom files at all.
+- `sv_pure` at -1, 0 or 1. With `sv_pure 1` the clients need these lines in `cfg/pure_server_whitelist.txt`. The plugin adds them on load when they are missing. It only adds lines. It never removes or changes other rules. The new rules apply after the next map change. Until then the plugin holds the model transfers and tells the players and the admins. With `sv_pure 2` the clients do not load custom files at all. The plugin does not change `sv_pure`. It writes a notice to the log and to the admins, and the `Beams` clip style still works.
 
   ```
   whitelist

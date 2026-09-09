@@ -181,6 +181,9 @@ int g_iHandlerHooks[MAXPLAYERS+1][2];
 int g_iVerifyPending[MAXPLAYERS+1];
 int g_iVerifyTicks[MAXPLAYERS+1];
 int g_iPushNext[MAXPLAYERS+1];
+int g_iPureMode;
+bool g_bWhitelistPending;
+bool g_bPureNoticeSent[MAXPLAYERS+1];
 
 public void OnPluginStart()
 {
@@ -244,6 +247,8 @@ public void OnPluginStart()
 	{
 		SetFailState("Could not prepare the netchannel calls");
 	}
+
+	EnsureWhitelist();
 
 	BuildPath(Path_SM, g_sDeliveredPath, sizeof g_sDeliveredPath, "data/showbrushes_delivered.txt");
 	g_Delivered = new KeyValues("Delivered");
@@ -340,8 +345,117 @@ Menu BuildTypeMenu(const char[] title, const char[][] names, int count)
 	return menu;
 }
 
+void EnsureWhitelist()
+{
+	char path[PLATFORM_MAX_PATH] = "cfg/pure_server_whitelist.txt";
+	if (!FileExists(path, true, "GAME") && FileExists("pure_server_whitelist.txt", true, "GAME"))
+	{
+		strcopy(path, sizeof path, "pure_server_whitelist.txt");
+	}
+
+	ArrayList lines = new ArrayList(ByteCountToCells(512));
+	bool models, materials, exists;
+	int closing = -1;
+	char line[512], probe[512];
+	File f = OpenFile(path, "r", true, "GAME");
+	if (f != null)
+	{
+		exists = true;
+		while (f.ReadLine(line, sizeof line))
+		{
+			strcopy(probe, sizeof probe, line);
+			ReplaceString(probe, sizeof probe, "/", "\\");
+			models = models || StrContains(probe, "models\\showbrushes\\", false) != -1;
+			materials = materials || StrContains(probe, "materials\\showbrushes\\", false) != -1;
+			if (StrContains(line, "}") != -1)
+			{
+				closing = lines.Length;
+			}
+			lines.PushString(line);
+		}
+		delete f;
+	}
+	if (models && materials)
+	{
+		delete lines;
+		return;
+	}
+	if (exists && closing == -1)
+	{
+		LogError("%s has no closing brace. Add the showbrushes rules yourself, see the README.", path);
+		delete lines;
+		return;
+	}
+
+	f = OpenFile(path, "w", true, "DEFAULT_WRITE_PATH");
+	if (f == null)
+	{
+		LogError("Could not write %s. Add the showbrushes rules yourself, see the README.", path);
+		delete lines;
+		return;
+	}
+	if (!exists)
+	{
+		f.WriteLine("whitelist");
+		f.WriteLine("{");
+	}
+	for (int i = 0; i <= lines.Length; i++)
+	{
+		if (i == closing || (!exists && i == 0))
+		{
+			f.WriteLine("\t// showbrushes");
+			if (!models)
+			{
+				f.WriteLine("\tmodels\\showbrushes\\...      any");
+			}
+			if (!materials)
+			{
+				f.WriteLine("\tmaterials\\showbrushes\\...   any");
+			}
+		}
+		if (i < lines.Length)
+		{
+			lines.GetString(i, line, sizeof line);
+			f.WriteString(line, false);
+		}
+	}
+	if (!exists)
+	{
+		f.WriteLine("}");
+	}
+	delete f;
+	delete lines;
+
+	g_bWhitelistPending = true;
+	LogMessage("Added the showbrushes rules to %s. They apply after the next map change.", path);
+}
+
+int ReadPureMode()
+{
+	char output[2048];
+	ServerCommandEx(output, sizeof output, "sv_pure");
+	int pos = StrContains(output, "Current sv_pure value is ");
+	return pos == -1 ? -1 : StringToInt(output[pos + 25]);
+}
+
+bool ModelsBlocked()
+{
+	return g_iPureMode == 2 || (g_iPureMode == 1 && g_bWhitelistPending);
+}
+
+public void OnMapEnd()
+{
+	g_bWhitelistPending = false;
+}
+
 public void OnConfigsExecuted()
 {
+	g_iPureMode = ReadPureMode();
+	if (g_iPureMode == 2)
+	{
+		LogMessage("sv_pure 2 blocks the model files. Clip beams still work. Set sv_pure 1 to enable the models.");
+	}
+
 	int tick = RoundToNearest(1.0 / GetTickInterval());
 	if (tick > 100)
 	{
@@ -496,6 +610,7 @@ public void OnClientPutInServer(int client)
 {
 	g_bClientHasModel[client] = false;
 	g_bModelBusy[client] = false;
+	g_bPureNoticeSent[client] = false;
 	g_iVerifyPending[client] = 0;
 }
 
@@ -504,6 +619,17 @@ public void OnClientPostAdminCheck(int client)
 	if (IsFakeClient(client))
 	{
 		return;
+	}
+	if (ModelsBlocked() && (GetUserFlagBits(client) & (ADMFLAG_RCON|ADMFLAG_ROOT)) != 0)
+	{
+		if (g_iPureMode == 2)
+		{
+			PrintToChat(client, "%s[showbrushes] %ssv_pure 2%s blocks the model files. Set %ssv_pure 1%s to enable them.", WHITE, GOLD, WHITE, GOLD, WHITE);
+		}
+		else
+		{
+			PrintToChat(client, "%s[showbrushes] The pure whitelist was updated. Models work after the next map change.", WHITE);
+		}
 	}
 	if (g_bTriggersCached)
 	{
@@ -3451,6 +3577,23 @@ void EnsureClientModel(int client)
 		return;
 	}
 	g_bModelBusy[client] = true;
+	if (ModelsBlocked())
+	{
+		if (g_bPureNoticeSent[client])
+		{
+			return;
+		}
+		g_bPureNoticeSent[client] = true;
+		if (g_iPureMode == 2)
+		{
+			PrintToChat(client, "%sThis server runs %ssv_pure 2%s, which blocks the trigger and clip models. The %sBeams%s clip style still works.", WHITE, GOLD, WHITE, GOLD, WHITE);
+		}
+		else
+		{
+			PrintToChat(client, "%sThe trigger and clip models work after the next map change.", WHITE);
+		}
+		return;
+	}
 	QueryClientConVar(client, "sv_allowupload", OnAllowUploadQueried);
 }
 
