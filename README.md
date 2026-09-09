@@ -5,7 +5,7 @@ A [Show Triggers](https://github.com/blankbhop/improved-showtriggers) fork for S
 ## Features
 
 - Shows `trigger_multiple`, `trigger_push`, `trigger_teleport` and `trigger_teleport_relative` brushes per player by removing `EF_NODRAW` and filtering them in a `SDKHook_SetTransmit` hook.
-- Colors triggers by type: push triggers green, teleports red, `trigger_multiple` orange for `gravity 40` outputs, teal for `gravity -` outputs and green for `basevelocity` outputs (output data comes from the `output_info` plugin natives).
+- Colors triggers by type: push triggers green, teleports red, `trigger_multiple` orange for `gravity 40` outputs, teal for `gravity -` outputs and green for `basevelocity` outputs (output data is read from the map's entity lump via SourceMod's `EntityLump` natives and matched to entities by `hammerid`).
 - Selection mode (`!select`): every trigger is shown, the trigger under the crosshair is highlighted cyan and picked triggers are yellow. The plugin caches all `trigger_*` entities on map start and finds the aimed trigger by intersecting the eye ray with each trigger's bounding box (slab test).
 - After `!confirm`, `!st` only toggles the selected triggers. `!reset` returns to the normal per-type mode.
 - The settings menu has a `Selection...` submenu with the same actions (toggle selection mode, pick, confirm, clear, reset), so selection works without chat commands.
@@ -25,13 +25,12 @@ A [Show Triggers](https://github.com/blankbhop/improved-showtriggers) fork for S
 
 ## Requirements
 
-- SourceMod 1.12 with SDKHooks and SDKTools
-- The `output_info` plugin, which provides the `GetOutputCount` and `GetOutputParameter` natives (the include is vendored in `addons/sourcemod/scripting/include`)
+- SourceMod 1.12 with SDKHooks and SDKTools (the `EntityLump` natives ship with 1.12)
 
 ## Building
 
 ```sh
-spcomp -i addons/sourcemod/scripting/include addons/sourcemod/scripting/supershowtriggers.sp
+spcomp addons/sourcemod/scripting/supershowtriggers.sp
 ```
 
 ## Provenance

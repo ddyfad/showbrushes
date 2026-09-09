@@ -4,7 +4,7 @@
 #include <sourcemod>
 #include <sdkhooks>
 #include <sdktools>
-#include <output_info_plugin>
+#include <entitylump>
 
 #define PLUGIN_NAME "super showtriggers"
 #define PLUGIN_AUTHOR "gangy & tommy"
@@ -64,6 +64,15 @@ int g_iHighlightedTrigger[MAXPLAYERS+1] = {-1, ...};
 // Cache of all triggers on the map
 ArrayList g_AllTriggersOnMap;
 
+enum
+{
+	MULTIPLE_PLAIN,
+	MULTIPLE_GRAVITY_40,
+	MULTIPLE_GRAVITY_NEG,
+	MULTIPLE_BASEVELOCITY
+};
+int g_iMultipleKind[2048+1];
+
 
 public void OnPluginStart()
 {
@@ -97,7 +106,7 @@ public void OnPluginStart()
 	{
 		menu.AddItem(IntToStringEx(i), g_NAMES[i]);
 	}
-	menu.AddItem("-3", "\nSelection...");
+	menu.AddItem("-3", "Selection");
 	g_Menu = menu;
 
 	Menu selection = new Menu(menuHandler_Selection, MenuAction_DrawItem|MenuAction_DisplayItem);
@@ -140,12 +149,16 @@ public Action Timer_CacheAllTriggers(Handle timer)
 	// Clear the existing cache
 	g_AllTriggersOnMap.Clear();
 
+	StringMap kinds = ReadMultipleKindsFromLump();
+
 	// Find all trigger entities
-	char className[32];
+	char className[32], hammerId[16];
 	int count = 0;
 
 	for (int ent = MaxClients + 1; ent <= 2048; ent++)
 	{
+		g_iMultipleKind[ent] = MULTIPLE_PLAIN;
+
 		if (!IsValidEntity(ent))
 			continue;
 
@@ -155,11 +168,64 @@ public Action Timer_CacheAllTriggers(Handle timer)
 			g_AllTriggersOnMap.Push(ent);
 			count++;
 		}
+
+		if (StrEqual(className, "trigger_multiple"))
+		{
+			IntToString(GetEntProp(ent, Prop_Data, "m_iHammerID"), hammerId, sizeof hammerId);
+			kinds.GetValue(hammerId, g_iMultipleKind[ent]);
+		}
 	}
 
+	delete kinds;
 	PrintToServer("Cached %d triggers on the map", count);
 
 	return Plugin_Continue;
+}
+
+StringMap ReadMultipleKindsFromLump()
+{
+	StringMap kinds = new StringMap();
+	char buffer[256], hammerId[16], parts[5][128];
+	// Output value: "target,input,parameter,delay,once" (\x1B-separated outside CSS)
+	char separator[2] = ",";
+	if (GetEngineVersion() != Engine_CSS)
+		separator = "\x1B";
+
+	int length = EntityLump.Length();
+	for (int i = 0; i < length; i++)
+	{
+		EntityLumpEntry entry = EntityLump.Get(i);
+		entry.GetNextKey("classname", buffer, sizeof buffer);
+		if (!StrEqual(buffer, "trigger_multiple"))
+		{
+			delete entry;
+			continue;
+		}
+
+		int kind = MULTIPLE_PLAIN;
+		int pos = -1;
+		while (kind == MULTIPLE_PLAIN && (pos = entry.GetNextKey("OnStartTouch", buffer, sizeof buffer, pos)) != -1)
+		{
+			ExplodeString(buffer, separator, parts, sizeof parts, sizeof parts[]);
+			if (StrEqual(parts[2], "gravity 40"))
+				kind = MULTIPLE_GRAVITY_40;
+		}
+		pos = -1;
+		while (kind == MULTIPLE_PLAIN && (pos = entry.GetNextKey("OnEndTouch", buffer, sizeof buffer, pos)) != -1)
+		{
+			ExplodeString(buffer, separator, parts, sizeof parts, sizeof parts[]);
+			if (StrContains(parts[2], "gravity -") != -1)
+				kind = MULTIPLE_GRAVITY_NEG;
+			else if (StrContains(parts[2], "basevelocity") != -1)
+				kind = MULTIPLE_BASEVELOCITY;
+		}
+
+		entry.GetNextKey("hammerid", hammerId, sizeof hammerId);
+		kinds.SetValue(hammerId, kind);
+		delete entry;
+	}
+
+	return kinds;
 }
 
 public void OnClientConnected(int client)
@@ -995,33 +1061,7 @@ void ResetTriggerColor(int entity)
 
 	if (StrEqual(className, "trigger_multiple"))
 	{
-		char buffer[32];
-		int count = GetOutputCount(entity, "m_OnStartTouch");
-		for (int i = 0; i < count; i++)
-		{
-			GetOutputParameter(entity, "m_OnStartTouch", i, buffer);
-			if (StrEqual(buffer, "gravity 40"))
-			{
-				SetEntityRenderColor(entity, 255, 100, 0, 255);
-				return;
-			}
-		}
-		count = GetOutputCount(entity, "m_OnEndTouch");
-		for (int i = 0; i < count; i++)
-		{
-			GetOutputParameter(entity, "m_OnEndTouch", i, buffer);
-			if (StrContains(buffer, "gravity -") != -1)
-			{
-				SetEntityRenderColor(entity, 0, 255, 185, 255);
-				return;
-			}
-			if (StrContains(buffer, "basevelocity") != -1)
-			{
-				SetEntityRenderColor(entity, 0, 255, 0, 255);
-				return;
-			}
-		}
-		SetEntityRenderColor(entity, 255, 255, 255, 255);
+		ColorTriggerMultiple(entity);
 	}
 	else if (StrEqual(className, "trigger_push"))
 	{
@@ -1034,6 +1074,17 @@ void ResetTriggerColor(int entity)
 	else
 	{
 		SetEntityRenderColor(entity, 255, 255, 255, 255);
+	}
+}
+
+void ColorTriggerMultiple(int entity)
+{
+	switch (g_iMultipleKind[entity])
+	{
+		case MULTIPLE_GRAVITY_40:   SetEntityRenderColor(entity, 255, 100, 0, 255);
+		case MULTIPLE_GRAVITY_NEG:  SetEntityRenderColor(entity, 0, 255, 185, 255);
+		case MULTIPLE_BASEVELOCITY: SetEntityRenderColor(entity, 0, 255, 0, 255);
+		default:                    SetEntityRenderColor(entity, 255, 255, 255, 255);
 	}
 }
 
@@ -1066,30 +1117,7 @@ public Action hookST_triggerMultiple(int entity, int client)
 		return Plugin_Handled;
 
 	// Normal coloring
-	char buffer[32];
-	GetEntityClassname(entity, buffer, sizeof(buffer));
-	int count = GetOutputCount(entity, "m_OnStartTouch");
-	for(int i = 0; i < count; i++)
-	{
-		GetOutputParameter(entity, "m_OnStartTouch", i, buffer);
-		if(StrEqual(buffer, "gravity 40"))
-		{
-			SetEntityRenderColor(entity, 255, 100, 0, 255);
-		}
-	}
-	count = GetOutputCount(entity, "m_OnEndTouch");
-	for(int i = 0; i < count; i++)
-	{
-		GetOutputParameter(entity, "m_OnEndTouch", i, buffer);
-		if(StrContains(buffer, "gravity -") != -1)
-		{
-			SetEntityRenderColor(entity, 0, 255, 185, 255);
-		}
-		if(StrContains(buffer, "basevelocity") != -1)
-		{
-			SetEntityRenderColor(entity, 0, 255, 0, 255);
-		}
-	}
+	ColorTriggerMultiple(entity);
 	return Plugin_Continue;
 }
 
