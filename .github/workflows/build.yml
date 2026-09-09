@@ -1,0 +1,26 @@
+name: build
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up SourcePawn compiler
+        uses: rumblefrog/setup-sp@master
+        with:
+          version: "1.12.x"
+
+      - name: Compile
+        run: |
+          mkdir -p plugins
+          spcomp -i addons/sourcemod/scripting/include -o plugins/supershowtriggers.smx addons/sourcemod/scripting/supershowtriggers.sp
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: supershowtriggers
+          path: plugins/supershowtriggers.smx
