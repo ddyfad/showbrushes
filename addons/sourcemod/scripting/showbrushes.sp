@@ -3791,6 +3791,8 @@ void PushModel(int client)
 	}
 	if (!sent)
 	{
+		SDKCall(g_hSetFileTransmissionMode, netchan, true);
+		g_bModelBusy[client] = false;
 		return;
 	}
 
