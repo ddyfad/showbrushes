@@ -18,9 +18,9 @@ jobs:
       - name: Compile
         run: |
           mkdir -p plugins
-          spcomp -i addons/sourcemod/scripting/include -o plugins/supershowtriggers.smx addons/sourcemod/scripting/supershowtriggers.sp
+          spcomp -i addons/sourcemod/scripting/include -o plugins/showbrushes.smx addons/sourcemod/scripting/showbrushes.sp
 
       - uses: actions/upload-artifact@v4
         with:
-          name: supershowtriggers
-          path: plugins/supershowtriggers.smx
+          name: showbrushes
+          path: plugins/showbrushes.smx
