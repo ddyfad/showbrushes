@@ -1733,6 +1733,8 @@ public void OnPluginEnd()
 
 // ======================== Normal Functions ========================
 
+
+
 void CheckBrushes(bool transmit)
 {
 	// If transmit state has not changed, do nothing
@@ -1744,6 +1746,7 @@ void CheckBrushes(bool transmit)
 	g_bHooked = transmit;
 
 	char className[32];
+
 	for (int ent = MaxClients + 1; ent <= 2048; ent++)
 	{
 		if (!IsValidEntity(ent))
@@ -1756,6 +1759,7 @@ void CheckBrushes(bool transmit)
 			SetBrushVisible(ent, hookST_ClipType, transmit);
 			continue;
 		}
+
 		if (g_iClipPropClip[ent] != -1)
 		{
 			SetBrushVisible(ent, hookST_Clip, transmit);
@@ -1763,6 +1767,7 @@ void CheckBrushes(bool transmit)
 		}
 
 		int type = -1;
+
 		if (g_iProxyTrigger[ent] != -1)
 		{
 			type = g_iProxyType[ent];
@@ -1770,6 +1775,7 @@ void CheckBrushes(bool transmit)
 		else
 		{
 			GetEntityClassname(ent, className, sizeof className);
+
 			if (StrContains(className, "func_") != 0 && StrContains(className, "trigger_") != 0)
 			{
 				continue;
@@ -1780,7 +1786,14 @@ void CheckBrushes(bool transmit)
 				if (StrEqual(className, g_NAMES[i]))
 				{
 					type = i;
+					break;
 				}
+			}
+
+			// Ignore non-brush trigger entities, such as Shavit zone placeholder models.
+			if (type != -1 && !IsBrushTrigger(ent))
+			{
+				continue;
 			}
 		}
 
@@ -1800,6 +1813,14 @@ SDKHookCB HookForType(int type)
 		case TRIGGER_TELEPORT:          return hookST_triggerTeleport;
 	}
 	return hookST_triggerTeleportRelative;
+}
+
+bool IsBrushTrigger(int ent)
+{
+    char model[PLATFORM_MAX_PATH];
+    GetEntPropString(ent, Prop_Data, "m_ModelName", model, sizeof(model));
+
+    return model[0] == '*';
 }
 
 void SetBrushVisible(int ent, SDKHookCB f, bool visible)
