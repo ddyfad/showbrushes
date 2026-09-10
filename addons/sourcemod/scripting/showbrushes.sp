@@ -544,7 +544,7 @@ public Action Timer_CacheAllTriggers(Handle timer)
 			continue;
 
 		GetEntityClassname(ent, className, sizeof(className));
-		if (StrContains(className, "trigger_") == 0)
+		if (StrContains(className, "trigger_") == 0 && IsBrushTrigger(ent))
 		{
 			g_AllTriggersOnMap.Push(ent);
 			IntToString(GetEntProp(ent, Prop_Data, "m_iHammerID"), hammerId, sizeof hammerId);
