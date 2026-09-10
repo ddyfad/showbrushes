@@ -281,6 +281,7 @@ public void OnPluginStart()
 	RegConsoleCmd("sm_st", cmdShowTriggers, "Toggles brush visibility");
 	RegConsoleCmd("sm_showclips", cmdShowClips, "Toggles clip visibility");
 	RegConsoleCmd("sm_sc", cmdShowClips, "Toggles clip visibility");
+	RegConsoleCmd("sm_spc", cmdShowClips, "Toggles clip visibility");
 	RegConsoleCmd("sm_sbhelp", cmdShowTriggersHelp, "Show help for brush selection");
 
 	// Selection commands
