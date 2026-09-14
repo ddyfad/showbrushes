@@ -52,6 +52,7 @@ This plugin is a [Show Triggers](https://github.com/blankbhop/improved-showtrigg
   }
   ```
 - Clients must keep `sv_allowupload` at its default value of 1. Otherwise the engine discards the transferred files.
+- `shavit-core` is optional. If it's loaded, chat colors are pulled from its configured `shavit-messages.cfg` colors instead of the plugin's own defaults.
 
 ## Forced server settings
 
