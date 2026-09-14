@@ -514,7 +514,7 @@ public void OnConfigsExecuted()
 
 public void OnLibraryAdded(const char[] name)
 {
-	if (StrEqual(name, "shavit-core"))
+	if (StrEqual(name, "shavit"))
 	{
 		UpdateChatColors();
 	}
@@ -522,7 +522,7 @@ public void OnLibraryAdded(const char[] name)
 
 public void OnLibraryRemoved(const char[] name)
 {
-	if (StrEqual(name, "shavit-core"))
+	if (StrEqual(name, "shavit"))
 	{
 		UpdateChatColors();
 	}
@@ -532,7 +532,7 @@ public void OnLibraryRemoved(const char[] name)
 void UpdateChatColors()
 {
 #if defined _shavit_core_included
-	if (LibraryExists("shavit-core"))
+	if (LibraryExists("shavit"))
 	{
 		chatstrings_t strings;
 		Shavit_GetChatStringsStruct(strings, sizeof(strings));
