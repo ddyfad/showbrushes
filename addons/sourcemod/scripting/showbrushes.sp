@@ -116,6 +116,8 @@ bool g_bTypeEnabled[MAXPLAYERS+1][MAX_TYPES];
 bool g_bClipEnabled[MAXPLAYERS+1][MAX_CLIP_TYPES];
 // Master on/off switch for !st, independent of which trigger types are configured
 bool g_bTriggersOn[MAXPLAYERS+1];
+// Master on/off switch for !sc, independent of which clip types are configured
+bool g_bClipsOn[MAXPLAYERS+1];
 // Offset for brush effects
 int g_iOffsetMFEffects = -1;
 
@@ -696,7 +698,7 @@ void ApplySettings(int client)
 	}
 	g_bSettingsApplied[client] = true;
 
-	char value[64], parts[7][8];
+	char value[64], parts[8][8];
 	g_Cookie.Get(client, value, sizeof value);
 	int numParts = ExplodeString(value, " ", parts, sizeof parts, sizeof parts[]);
 	if (numParts < 6)
@@ -714,7 +716,7 @@ void ApplySettings(int client)
 	g_iTriggerAlpha[client] = StringToInt(parts[4]) % sizeof g_ALPHAS;
 	g_iClipAlpha[client] = StringToInt(parts[5]) % sizeof g_ALPHAS;
 
-	// parts[6] is only there for players who saved a cookie before this field existed; new ones always have it
+	// parts[6]/[7] are only there for players who saved a cookie before these fields existed; new ones always have them
 	if (numParts >= 7)
 	{
 		int triggers = StringToInt(parts[6]);
@@ -722,6 +724,10 @@ void ApplySettings(int client)
 		{
 			g_bTypeEnabled[client][i] = ((triggers >> i) & 1) != 0;
 		}
+	}
+	if (numParts >= 8)
+	{
+		g_bClipsOn[client] = StringToInt(parts[7]) != 0;
 	}
 
 	CheckBrushes(ShouldRender());
@@ -745,7 +751,7 @@ void SaveSettings(int client)
 		triggers |= (g_bTypeEnabled[client][i] ? 1 : 0) << i;
 	}
 	char value[64];
-	Format(value, sizeof value, "%d %d %d %d %d %d %d", g_bTriggersOn[client] ? 1 : 0, clips, g_bClipBeams[client], g_iBeamWidth[client], g_iTriggerAlpha[client], g_iClipAlpha[client], triggers);
+	Format(value, sizeof value, "%d %d %d %d %d %d %d %d", g_bTriggersOn[client] ? 1 : 0, clips, g_bClipBeams[client], g_iBeamWidth[client], g_iTriggerAlpha[client], g_iClipAlpha[client], triggers, g_bClipsOn[client] ? 1 : 0);
 	g_Cookie.Set(client, value);
 }
 
@@ -775,9 +781,10 @@ public void OnClientConnected(int client)
 	}
 	g_SelectedClips[client] = new ArrayList();
 
-	// Default to all trigger types enabled and the master switch off; ApplySettings overrides both from the cookie if saved before
+	// Default to all trigger/clip types enabled and both master switches off; ApplySettings overrides all of it from the cookie if saved before
 	SetAllTypes(client, false);
 	SetAllTriggerTypes(client, true);
+	SetAllClipTypes(client, true);
 }
 
 void SetAllTypes(int client, bool enabled)
@@ -791,6 +798,7 @@ void SetAllTypes(int client, bool enabled)
 		g_bClipEnabled[client][i] = enabled;
 	}
 	g_bTriggersOn[client] = enabled;
+	g_bClipsOn[client] = enabled;
 }
 
 void SetAllTriggerTypes(int client, bool enabled)
@@ -798,6 +806,14 @@ void SetAllTriggerTypes(int client, bool enabled)
 	for (int i = 0; i < MAX_TYPES; i++)
 	{
 		g_bTypeEnabled[client][i] = enabled;
+	}
+}
+
+void SetAllClipTypes(int client, bool enabled)
+{
+	for (int i = 0; i < MAX_CLIP_TYPES; i++)
+	{
+		g_bClipEnabled[client][i] = enabled;
 	}
 }
 
@@ -1290,9 +1306,10 @@ public Action cmdShowClips(int client, int args)
 	}
 
 	RefreshBeams(client);
-	if (!g_bClipEnabled[client][CLIP_PLAYER])
+	// Master on/off switch, doesn't touch which clip types are configured
+	if (!g_bClipsOn[client])
 	{
-		g_bClipEnabled[client][CLIP_PLAYER] = true;
+		g_bClipsOn[client] = true;
 		CheckBrushes(ShouldRender());
 		RequestModels(client);
 		PrintToChat(client, "%sShowclips toggled: %sON", WHITE, GREEN);
@@ -1301,7 +1318,7 @@ public Action cmdShowClips(int client, int args)
 	}
 	else
 	{
-		g_bClipEnabled[client][CLIP_PLAYER] = false;
+		g_bClipsOn[client] = false;
 		CheckBrushes(ShouldRender());
 		PrintToChat(client, "%sShowclips toggled: %sOFF", WHITE, RED);
 	}
@@ -1526,6 +1543,9 @@ void SetTypeEnabled(Menu menu, int client, int type, bool enabled)
 	if (menu == g_ClipMenu)
 	{
 		g_bClipEnabled[client][type] = enabled;
+		// Also flip the master switch on, so it shows immediately like before !sc existed
+		if (enabled)
+			g_bClipsOn[client] = true;
 	}
 	else
 	{
@@ -2207,7 +2227,7 @@ public Action hookST_triggerGravity(int entity, int client)
 
 public Action hookST_ClipType(int entity, int client)
 {
-	if (!g_bClipEnabled[client][g_iClipPropType[entity]] || g_bClipBeams[client])
+	if (!g_bClipsOn[client] || !g_bClipEnabled[client][g_iClipPropType[entity]] || g_bClipBeams[client])
 		return Plugin_Handled;
 	if (!g_bClientHasModel[client])
 	{
@@ -2225,7 +2245,7 @@ public Action hookST_Clip(int entity, int client)
 	int clip = g_iClipPropClip[entity];
 	Clip c;
 	g_Clips.GetArray(clip, c);
-	if (!g_bClipEnabled[client][c.type] || g_bClipBeams[client])
+	if (!g_bClipsOn[client] || !g_bClipEnabled[client][c.type] || g_bClipBeams[client])
 		return Plugin_Handled;
 	if (!g_bClientHasModel[client])
 	{
@@ -3130,7 +3150,7 @@ void BuildBeamPass(int client)
 	for (int i = 0; i < g_Clips.Length; i++)
 	{
 		g_Clips.GetArray(i, c);
-		if (!g_bClipEnabled[client][c.type])
+		if (!g_bClipsOn[client] || !g_bClipEnabled[client][c.type])
 		{
 			continue;
 		}
@@ -4258,9 +4278,12 @@ void RequestModels(int client)
 			wanted = wanted || g_bTypeEnabled[client][i];
 		}
 	}
-	for (int i = 0; i < MAX_CLIP_TYPES && !g_bClipBeams[client]; i++)
+	if (g_bClipsOn[client])
 	{
-		wanted = wanted || g_bClipEnabled[client][i];
+		for (int i = 0; i < MAX_CLIP_TYPES && !g_bClipBeams[client]; i++)
+		{
+			wanted = wanted || g_bClipEnabled[client][i];
+		}
 	}
 	if (wanted && !g_bClientHasModel[client])
 	{
