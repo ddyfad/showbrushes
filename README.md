@@ -32,6 +32,7 @@ This plugin is a [Show Triggers](https://github.com/blankbhop/improved-showtrigg
 | `sm_sbhelp` | Show the command list. |
 | `sm_select` | Turn the selection mode on or off. |
 | `sm_pick` | Add or remove the trigger or clip under the crosshair. |
+| `sm_identifytrigger`, `sm_it` | Print debug info for the trigger under the crosshair. Also in the Selection submenu. |
 | `sm_confirm` | Confirm the selection. `sm_st` and `sm_sc` then apply to the picked brushes. |
 | `sm_clear` | Remove all brushes from the selection. |
 | `sm_reset` | Remove the selection and leave the selection mode. |

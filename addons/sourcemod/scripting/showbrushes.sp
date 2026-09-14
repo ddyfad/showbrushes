@@ -151,6 +151,14 @@ enum
 };
 int g_iMultipleKind[2048+1];
 
+static const char g_MULTIPLE_KIND_NAMES[][] =
+{
+	"plain",
+	"gravity 40 (orange)",
+	"gravity - (teal)",
+	"basevelocity (green)"
+};
+
 int g_iProxyTrigger[2048+1] = {-1, ...};
 int g_iProxyType[2048+1];
 int g_iClipPropType[2048+1] = {-1, ...};
@@ -294,6 +302,8 @@ public void OnPluginStart()
 	RegConsoleCmd("sm_confirm", cmdConfirmSelection, "Confirm trigger selection");
 	RegConsoleCmd("sm_reset", cmdResetSelection, "Reset trigger selection");
 	RegConsoleCmd("sm_clear", cmdClearSelection, "Clear current selection");
+	RegConsoleCmd("sm_identifytrigger", cmdIdentifyTrigger, "Show debug info for the aimed trigger");
+	RegConsoleCmd("sm_it", cmdIdentifyTrigger, "Show debug info for the aimed trigger");
 
 	Menu menu = new Menu(menuHandler_Main);
 	menu.SetTitle("Toggle Visibility");
@@ -315,6 +325,7 @@ public void OnPluginStart()
 	selection.ExitBackButton = true;
 	selection.AddItem("select", "Selection mode");
 	selection.AddItem("pick", "Pick aimed brush");
+	selection.AddItem("identify", "Identify Trigger");
 	selection.AddItem("confirm", "Confirm selection");
 	selection.AddItem("clear", "Clear selection");
 	selection.AddItem("reset", "Reset selection");
@@ -1032,6 +1043,7 @@ public Action cmdShowTriggersHelp(int client, int args)
 	PrintToChat(client, "%s!clear - Clear current selection", WHITE);
 	PrintToChat(client, "%s!confirm - Confirm your selection", WHITE);
 	PrintToChat(client, "%s!reset - Reset your selection", WHITE);
+	PrintToChat(client, "%s!identifytrigger - Show debug info for the trigger under your crosshair", WHITE);
 
 	return Plugin_Handled;
 }
@@ -1167,6 +1179,70 @@ void PickClip(int client, int clip)
 			WHITE, RED, WHITE,
 			GOLD, g_CLIP_NAMES[c.type], WHITE,
 			GOLD, SelectionCount(client), WHITE);
+	}
+}
+
+public Action cmdIdentifyTrigger(int client, int args)
+{
+	if (!IsValidClient(client))
+		return Plugin_Handled;
+
+	int aimTarget, aimClip;
+	FindAimTarget(client, aimTarget, aimClip);
+
+	if (aimTarget == -1 || !IsValidEntity(aimTarget))
+	{
+		PrintToChat(client, "%sNo trigger found. Aim directly at one.", WHITE);
+		return Plugin_Handled;
+	}
+
+	PrintTriggerIdentity(client, aimTarget);
+	return Plugin_Handled;
+}
+
+void PrintTriggerIdentity(int client, int entity)
+{
+	int trigger = TriggerOf(entity);
+
+	char className[32], targetname[64], parentName[64];
+	GetEntityClassname(trigger, className, sizeof className);
+	GetEntPropString(trigger, Prop_Data, "m_iName", targetname, sizeof targetname);
+
+	int hammerId = GetEntProp(trigger, Prop_Data, "m_iHammerID");
+	int spawnFlags = GetEntProp(trigger, Prop_Data, "m_spawnflags");
+
+	float origin[3], mins[3], maxs[3];
+	GetEntPropVector(trigger, Prop_Send, "m_vecOrigin", origin);
+	GetEntPropVector(trigger, Prop_Data, "m_vecMins", mins);
+	GetEntPropVector(trigger, Prop_Data, "m_vecMaxs", maxs);
+	for (int i = 0; i < 3; i++)
+	{
+		mins[i] += origin[i];
+		maxs[i] += origin[i];
+	}
+
+	int parent = GetEntPropEnt(trigger, Prop_Data, "m_hMoveParent");
+	parentName[0] = '\0';
+	if (parent > 0 && IsValidEntity(parent))
+	{
+		GetEntPropString(parent, Prop_Data, "m_iName", parentName, sizeof parentName);
+	}
+
+	PrintToChat(client, "%s--- %sTrigger Info%s ---", WHITE, GOLD, WHITE);
+	PrintToChat(client, "%sClass: %s%s%s  Name: %s%s", WHITE, GOLD, className, WHITE, GOLD, targetname[0] ? targetname : "(unnamed)");
+	PrintToChat(client, "%sEntity: %s%d%s  HammerID: %s%d%s  Spawnflags: %s%d",
+		WHITE, GOLD, trigger, WHITE, GOLD, hammerId, WHITE, GOLD, spawnFlags);
+	PrintToChat(client, "%sOrigin: %s%.0f %.0f %.0f", WHITE, GOLD, origin[0], origin[1], origin[2]);
+	PrintToChat(client, "%sBounds: %s(%.0f %.0f %.0f) -> (%.0f %.0f %.0f)", WHITE, GOLD,
+		mins[0], mins[1], mins[2], maxs[0], maxs[1], maxs[2]);
+	if (parent > 0 && IsValidEntity(parent))
+	{
+		PrintToChat(client, "%sParent: %s%s (#%d)", WHITE, GOLD, parentName[0] ? parentName : "(unnamed)", parent);
+	}
+
+	if (StrEqual(className, "trigger_multiple"))
+	{
+		PrintToChat(client, "%sOutput kind: %s%s", WHITE, GOLD, g_MULTIPLE_KIND_NAMES[g_iMultipleKind[trigger]]);
 	}
 }
 
@@ -1621,13 +1697,15 @@ public int menuHandler_Selection(Menu menu, MenuAction action, int param1, int p
 	{
 		case MenuAction_Select:
 		{
-			char info[8];
+			char info[16];
 			menu.GetItem(param2, info, sizeof info);
 
 			if (StrEqual(info, "select"))
 				cmdToggleSelectMode(param1, 0);
 			else if (StrEqual(info, "pick"))
 				cmdPick(param1, 0);
+			else if (StrEqual(info, "identify"))
+				cmdIdentifyTrigger(param1, 0);
 			else if (StrEqual(info, "confirm"))
 				cmdConfirmSelection(param1, 0);
 			else if (StrEqual(info, "clear"))
@@ -1644,7 +1722,7 @@ public int menuHandler_Selection(Menu menu, MenuAction action, int param1, int p
 		}
 		case MenuAction_DrawItem:
 		{
-			char info[8];
+			char info[16];
 			menu.GetItem(param2, info, sizeof info);
 
 			int count = SelectionCount(param1);
@@ -1665,7 +1743,7 @@ public int menuHandler_Selection(Menu menu, MenuAction action, int param1, int p
 		}
 		case MenuAction_DisplayItem:
 		{
-			char info[8];
+			char info[16];
 			char text[64];
 			menu.GetItem(param2, info, sizeof info, _, text, sizeof text);
 
