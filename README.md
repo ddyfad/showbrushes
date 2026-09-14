@@ -24,7 +24,7 @@ This plugin is a [Show Triggers](https://github.com/blankbhop/improved-showtrigg
 
 | Command | Description |
 | --- | --- |
-| `sm_showtriggers`, `sm_st` | Show or hide triggers. In normal mode this applies to `trigger_teleport`. After a confirmed selection this applies to the picked brushes. |
+| `sm_showtriggers`, `sm_st` | Show or hide the configured trigger types. After a confirmed selection this applies to the picked brushes. |
 | `sm_showclips`, `sm_sc` | Show or hide clips. In normal mode this applies to player clips. After a confirmed selection this applies to the picked brushes. |
 | `sm_showbrushessettings`, `sm_sbsettings`, `sm_sbs` | Open the settings menu with the trigger types, the clip types and the selection submenu. |
 | `sm_sts` | Open the trigger types submenu. |

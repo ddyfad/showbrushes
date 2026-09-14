@@ -39,7 +39,8 @@ public Plugin myinfo =
 #define TRIGGER_PUSH               1
 #define TRIGGER_TELEPORT           2
 #define TRIGGER_TELEPORT_RELATIVE  3
-#define MAX_TYPES                  4
+#define TRIGGER_GRAVITY            4
+#define MAX_TYPES                  5
 
 #define CLIP_PLAYER                0
 #define CLIP_NPC                   1
@@ -54,7 +55,8 @@ static const char g_NAMES[][] =
 	"trigger_multiple",
 	"trigger_push",
 	"trigger_teleport",
-	"trigger_teleport_relative"
+	"trigger_teleport_relative",
+	"trigger_gravity"
 };
 
 static const char g_CLIP_NAMES[][] =
@@ -112,6 +114,8 @@ static const int g_CLIP_COLORS[][3] =
 // Which brush types does the player have enabled?
 bool g_bTypeEnabled[MAXPLAYERS+1][MAX_TYPES];
 bool g_bClipEnabled[MAXPLAYERS+1][MAX_CLIP_TYPES];
+// Master on/off switch for !st, independent of which trigger types are configured
+bool g_bTriggersOn[MAXPLAYERS+1];
 // Offset for brush effects
 int g_iOffsetMFEffects = -1;
 
@@ -681,17 +685,15 @@ void ApplySettings(int client)
 	}
 	g_bSettingsApplied[client] = true;
 
-	char value[64], parts[6][8];
+	char value[64], parts[7][8];
 	g_Cookie.Get(client, value, sizeof value);
-	if (ExplodeString(value, " ", parts, sizeof parts, sizeof parts[]) < 6)
+	int numParts = ExplodeString(value, " ", parts, sizeof parts, sizeof parts[]);
+	if (numParts < 6)
 	{
 		return;
 	}
-	int triggers = StringToInt(parts[0]), clips = StringToInt(parts[1]);
-	for (int i = 0; i < MAX_TYPES; i++)
-	{
-		g_bTypeEnabled[client][i] = ((triggers >> i) & 1) != 0;
-	}
+	g_bTriggersOn[client] = StringToInt(parts[0]) != 0;
+	int clips = StringToInt(parts[1]);
 	for (int i = 0; i < MAX_CLIP_TYPES; i++)
 	{
 		g_bClipEnabled[client][i] = ((clips >> i) & 1) != 0;
@@ -700,6 +702,16 @@ void ApplySettings(int client)
 	g_iBeamWidth[client] = StringToInt(parts[3]) % sizeof g_BEAM_WIDTHS;
 	g_iTriggerAlpha[client] = StringToInt(parts[4]) % sizeof g_ALPHAS;
 	g_iClipAlpha[client] = StringToInt(parts[5]) % sizeof g_ALPHAS;
+
+	// parts[6] is only there for players who saved a cookie before this field existed; new ones always have it
+	if (numParts >= 7)
+	{
+		int triggers = StringToInt(parts[6]);
+		for (int i = 0; i < MAX_TYPES; i++)
+		{
+			g_bTypeEnabled[client][i] = ((triggers >> i) & 1) != 0;
+		}
+	}
 
 	CheckBrushes(ShouldRender());
 	RefreshBeams(client);
@@ -712,17 +724,17 @@ void SaveSettings(int client)
 	{
 		return;
 	}
-	int triggers, clips;
-	for (int i = 0; i < MAX_TYPES; i++)
-	{
-		triggers |= (g_bTypeEnabled[client][i] ? 1 : 0) << i;
-	}
+	int clips, triggers;
 	for (int i = 0; i < MAX_CLIP_TYPES; i++)
 	{
 		clips |= (g_bClipEnabled[client][i] ? 1 : 0) << i;
 	}
+	for (int i = 0; i < MAX_TYPES; i++)
+	{
+		triggers |= (g_bTypeEnabled[client][i] ? 1 : 0) << i;
+	}
 	char value[64];
-	Format(value, sizeof value, "%d %d %d %d %d %d", triggers, clips, g_bClipBeams[client], g_iBeamWidth[client], g_iTriggerAlpha[client], g_iClipAlpha[client]);
+	Format(value, sizeof value, "%d %d %d %d %d %d %d", g_bTriggersOn[client] ? 1 : 0, clips, g_bClipBeams[client], g_iBeamWidth[client], g_iTriggerAlpha[client], g_iClipAlpha[client], triggers);
 	g_Cookie.Set(client, value);
 }
 
@@ -752,8 +764,9 @@ public void OnClientConnected(int client)
 	}
 	g_SelectedClips[client] = new ArrayList();
 
-	// Reset trigger types
+	// Default to all trigger types enabled and the master switch off; ApplySettings overrides both from the cookie if saved before
 	SetAllTypes(client, false);
+	SetAllTriggerTypes(client, true);
 }
 
 void SetAllTypes(int client, bool enabled)
@@ -765,6 +778,15 @@ void SetAllTypes(int client, bool enabled)
 	for (int i = 0; i < MAX_CLIP_TYPES; i++)
 	{
 		g_bClipEnabled[client][i] = enabled;
+	}
+	g_bTriggersOn[client] = enabled;
+}
+
+void SetAllTriggerTypes(int client, bool enabled)
+{
+	for (int i = 0; i < MAX_TYPES; i++)
+	{
+		g_bTypeEnabled[client][i] = enabled;
 	}
 }
 
@@ -1159,10 +1181,10 @@ public Action cmdShowTriggers(int client, int args)
 		return Plugin_Handled;
 	}
 
-	// Normal mode: toggle trigger_teleport
-	if (!g_bTypeEnabled[client][TRIGGER_TELEPORT])
+	// Normal mode: master on/off switch, doesn't touch which types are configured
+	if (!g_bTriggersOn[client])
 	{
-		g_bTypeEnabled[client][TRIGGER_TELEPORT] = true;
+		g_bTriggersOn[client] = true;
 		CheckBrushes(ShouldRender());
 		RequestModels(client);
 		PrintToChat(client, "%sShowtriggers toggled: %sON", WHITE, GREEN);
@@ -1172,7 +1194,7 @@ public Action cmdShowTriggers(int client, int args)
 	}
 	else
 	{
-		g_bTypeEnabled[client][TRIGGER_TELEPORT] = false;
+		g_bTriggersOn[client] = false;
 		CheckBrushes(ShouldRender());
 		PrintToChat(client, "%sShowtriggers toggled: %sOFF", WHITE, RED);
 	}
@@ -1426,9 +1448,16 @@ bool IsTypeEnabled(Menu menu, int client, int type)
 void SetTypeEnabled(Menu menu, int client, int type, bool enabled)
 {
 	if (menu == g_ClipMenu)
+	{
 		g_bClipEnabled[client][type] = enabled;
+	}
 	else
+	{
 		g_bTypeEnabled[client][type] = enabled;
+		// Also flip the master switch on, so it shows immediately like before !st existed
+		if (enabled)
+			g_bTriggersOn[client] = true;
+	}
 }
 
 public int menuHandler_Types(Menu menu, MenuAction action, int param1, int param2)
@@ -1812,8 +1841,11 @@ SDKHookCB HookForType(int type)
 		case TRIGGER_MULTIPLE:          return hookST_triggerMultiple;
 		case TRIGGER_PUSH:              return hookST_triggerPush;
 		case TRIGGER_TELEPORT:          return hookST_triggerTeleport;
+		case TRIGGER_TELEPORT_RELATIVE: return hookST_triggerTeleportRelative;
+		case TRIGGER_GRAVITY:           return hookST_triggerGravity;
 	}
-	return hookST_triggerTeleportRelative;
+
+	return hookST_triggerGravity;
 }
 
 bool IsBrushTrigger(int ent)
@@ -1908,7 +1940,7 @@ public Action hookST_triggerMultiple(int entity, int client)
 {
 	int trigger = TriggerOf(entity);
 	// Not enabled for this client
-	if (!g_bTypeEnabled[client][TRIGGER_MULTIPLE])
+	if (!g_bTriggersOn[client] || !g_bTypeEnabled[client][TRIGGER_MULTIPLE])
 		return Plugin_Handled;
 	if (trigger != entity && !g_bClientHasModel[client])
 	{
@@ -1945,7 +1977,7 @@ public Action hookST_triggerPush(int entity, int client)
 {
 	int trigger = TriggerOf(entity);
 	// Not enabled for this client
-	if (!g_bTypeEnabled[client][TRIGGER_PUSH])
+	if (!g_bTriggersOn[client] || !g_bTypeEnabled[client][TRIGGER_PUSH])
 		return Plugin_Handled;
 	if (trigger != entity && !g_bClientHasModel[client])
 	{
@@ -1982,7 +2014,7 @@ public Action hookST_triggerTeleport(int entity, int client)
 {
 	int trigger = TriggerOf(entity);
 	// Not enabled for this client
-	if (!g_bTypeEnabled[client][TRIGGER_TELEPORT])
+	if (!g_bTriggersOn[client] || !g_bTypeEnabled[client][TRIGGER_TELEPORT])
 		return Plugin_Handled;
 	if (trigger != entity && !g_bClientHasModel[client])
 	{
@@ -2019,7 +2051,7 @@ public Action hookST_triggerTeleportRelative(int entity, int client)
 {
 	int trigger = TriggerOf(entity);
 	// Not enabled for this client
-	if (!g_bTypeEnabled[client][TRIGGER_TELEPORT_RELATIVE])
+	if (!g_bTriggersOn[client] || !g_bTypeEnabled[client][TRIGGER_TELEPORT_RELATIVE])
 		return Plugin_Handled;
 	if (trigger != entity && !g_bClientHasModel[client])
 	{
@@ -2049,6 +2081,45 @@ public Action hookST_triggerTeleportRelative(int entity, int client)
 
 	// Normal coloring
 	SetEntityRenderColor(entity, 255, 0, 0, g_ALPHAS[g_iTriggerAlpha[client]]);
+	return Plugin_Continue;
+}
+
+public Action hookST_triggerGravity(int entity, int client)
+{
+	int trigger = TriggerOf(entity);
+
+	// Not enabled for this client
+	if (!g_bTriggersOn[client] || !g_bTypeEnabled[client][TRIGGER_GRAVITY])
+		return Plugin_Handled;
+
+	if (trigger != entity && !g_bClientHasModel[client])
+	{
+		EnsureClientModel(client);
+		return Plugin_Handled;
+	}
+
+	// Selected triggers are always shown yellow in selection mode
+	if (g_bSelectMode[client] && g_SelectedTriggers[client].FindValue(trigger) != -1)
+	{
+		SetEntityRenderMode(entity, RENDER_TRANSCOLOR);
+		SetEntityRenderColor(entity, 255, 255, 0, 200);
+		return Plugin_Continue;
+	}
+
+	// The highlighted trigger is shown cyan
+	if (g_bSelectMode[client] && g_iHighlightedTrigger[client] == trigger)
+	{
+		SetEntityRenderMode(entity, RENDER_TRANSCOLOR);
+		SetEntityRenderColor(entity, 0, 255, 255, 200);
+		return Plugin_Continue;
+	}
+
+	// With a confirmed selection, hide the unselected triggers
+	if (g_bUseSelectionMode[client] && g_SelectedTriggers[client].FindValue(trigger) == -1)
+		return Plugin_Handled;
+
+	// Normal coloring - BLUE
+	SetEntityRenderColor(entity, 0, 255, 255, g_ALPHAS[g_iTriggerAlpha[client]]);
 	return Plugin_Continue;
 }
 
@@ -4098,9 +4169,12 @@ int ClientOfHandler(Address handler)
 void RequestModels(int client)
 {
 	bool wanted = false;
-	for (int i = 0; i < MAX_TYPES; i++)
+	if (g_bTriggersOn[client])
 	{
-		wanted = wanted || g_bTypeEnabled[client][i];
+		for (int i = 0; i < MAX_TYPES; i++)
+		{
+			wanted = wanted || g_bTypeEnabled[client][i];
+		}
 	}
 	for (int i = 0; i < MAX_CLIP_TYPES && !g_bClipBeams[client]; i++)
 	{
