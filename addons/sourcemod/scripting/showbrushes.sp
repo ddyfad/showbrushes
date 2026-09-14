@@ -7,6 +7,7 @@
 #include <entitylump>
 #include <dhooks>
 #include <clientprefs>
+#tryinclude <shavit/core>
 
 #pragma dynamic 2097152
 
@@ -18,11 +19,11 @@
 
 #define EF_NODRAW 32
 
-// Chat colors
-#define WHITE "\x07FFFFFF"
-#define GREEN "\x0700FF00"
-#define RED "\x07FF0000"
-#define GOLD "\x07FFD700"
+// Chat colors; overridden by shavit-core's config if it's loaded, see UpdateChatColors()
+char WHITE[16] = "\x07FFFFFF";
+char GREEN[16] = "\x0700FF00";
+char RED[16] = "\x07FF0000";
+char GOLD[16] = "\x07FFD700";
 
 public Plugin myinfo =
 {
@@ -39,7 +40,8 @@ public Plugin myinfo =
 #define TRIGGER_PUSH               1
 #define TRIGGER_TELEPORT           2
 #define TRIGGER_TELEPORT_RELATIVE  3
-#define MAX_TYPES                  4
+#define TRIGGER_GRAVITY            4
+#define MAX_TYPES                  5
 
 #define CLIP_PLAYER                0
 #define CLIP_NPC                   1
@@ -54,7 +56,8 @@ static const char g_NAMES[][] =
 	"trigger_multiple",
 	"trigger_push",
 	"trigger_teleport",
-	"trigger_teleport_relative"
+	"trigger_teleport_relative",
+	"trigger_gravity"
 };
 
 static const char g_CLIP_NAMES[][] =
@@ -112,6 +115,10 @@ static const int g_CLIP_COLORS[][3] =
 // Which brush types does the player have enabled?
 bool g_bTypeEnabled[MAXPLAYERS+1][MAX_TYPES];
 bool g_bClipEnabled[MAXPLAYERS+1][MAX_CLIP_TYPES];
+// Master on/off switch for !st, separate from which trigger types are enabled
+bool g_bTriggersOn[MAXPLAYERS+1];
+// Master on/off switch for !sc, separate from which clip types are enabled
+bool g_bClipsOn[MAXPLAYERS+1];
 // Offset for brush effects
 int g_iOffsetMFEffects = -1;
 
@@ -126,6 +133,7 @@ Database g_DB;
 StringMap g_TriggerByHammerId;
 bool g_bTriggersCached;
 bool g_bRestorePending[MAXPLAYERS+1];
+bool g_bProtobuf;
 
 // Selection mode
 bool g_bSelectMode[MAXPLAYERS+1];
@@ -146,6 +154,14 @@ enum
 	MULTIPLE_BASEVELOCITY
 };
 int g_iMultipleKind[2048+1];
+
+static const char g_MULTIPLE_KIND_NAMES[][] =
+{
+	"plain",
+	"gravity 40 (orange)",
+	"gravity - (teal)",
+	"basevelocity (green)"
+};
 
 int g_iProxyTrigger[2048+1] = {-1, ...};
 int g_iProxyType[2048+1];
@@ -202,6 +218,8 @@ bool g_bPureNoticeSent[MAXPLAYERS+1];
 
 public void OnPluginStart()
 {
+	g_bProtobuf = (GetUserMessageType() == UM_Protobuf);
+
 	g_iOffsetMFEffects = FindSendPropInfo("CBaseEntity", "m_fEffects");
 	if (g_iOffsetMFEffects == -1)
 	{
@@ -290,6 +308,8 @@ public void OnPluginStart()
 	RegConsoleCmd("sm_confirm", cmdConfirmSelection, "Confirm trigger selection");
 	RegConsoleCmd("sm_reset", cmdResetSelection, "Reset trigger selection");
 	RegConsoleCmd("sm_clear", cmdClearSelection, "Clear current selection");
+	RegConsoleCmd("sm_identifytrigger", cmdIdentifyTrigger, "Show debug info for the aimed trigger");
+	RegConsoleCmd("sm_it", cmdIdentifyTrigger, "Show debug info for the aimed trigger");
 
 	Menu menu = new Menu(menuHandler_Main);
 	menu.SetTitle("Toggle Visibility");
@@ -311,6 +331,7 @@ public void OnPluginStart()
 	selection.ExitBackButton = true;
 	selection.AddItem("select", "Selection mode");
 	selection.AddItem("pick", "Pick aimed brush");
+	selection.AddItem("identify", "Identify Trigger");
 	selection.AddItem("confirm", "Confirm selection");
 	selection.AddItem("clear", "Clear selection");
 	selection.AddItem("reset", "Reset selection");
@@ -487,6 +508,45 @@ public void OnConfigsExecuted()
 	RaiseConVar("sv_minrate", 128000, false);
 	RaiseConVar("sv_minupdaterate", tick, false);
 	RaiseConVar("sv_maxupdaterate", tick, true);
+
+	UpdateChatColors();
+}
+
+public void OnLibraryAdded(const char[] name)
+{
+	if (StrEqual(name, "shavit"))
+	{
+		UpdateChatColors();
+	}
+}
+
+public void OnLibraryRemoved(const char[] name)
+{
+	if (StrEqual(name, "shavit"))
+	{
+		UpdateChatColors();
+	}
+}
+
+// Pulls colors from shavit-core's config if it's loaded, else keeps the defaults above
+void UpdateChatColors()
+{
+#if defined _shavit_core_included
+	if (LibraryExists("shavit"))
+	{
+		chatstrings_t strings;
+		Shavit_GetChatStringsStruct(strings, sizeof(strings));
+		strcopy(WHITE, sizeof(WHITE), strings.sText);
+		strcopy(GOLD, sizeof(GOLD), strings.sVariable);
+		strcopy(GREEN, sizeof(GREEN), strings.sVariable2);
+		strcopy(RED, sizeof(RED), strings.sWarning);
+		return;
+	}
+#endif
+	strcopy(WHITE, sizeof(WHITE), "\x07FFFFFF");
+	strcopy(GOLD, sizeof(GOLD), "\x07FFD700");
+	strcopy(GREEN, sizeof(GREEN), "\x0700FF00");
+	strcopy(RED, sizeof(RED), "\x07FF0000");
 }
 
 void RaiseConVar(const char[] name, int value, bool zeroIsUnlimited)
@@ -647,11 +707,11 @@ public void OnClientPostAdminCheck(int client)
 	{
 		if (g_iPureMode == 2)
 		{
-			PrintToChat(client, "%s[showbrushes] %ssv_pure 2%s blocks the model files. Set %ssv_pure 1%s to enable them.", WHITE, GOLD, WHITE, GOLD, WHITE);
+			CPrintToChat(client, "%s[showbrushes] %ssv_pure 2%s blocks the model files. Set %ssv_pure 1%s to enable them.", WHITE, GOLD, WHITE, GOLD, WHITE);
 		}
 		else
 		{
-			PrintToChat(client, "%s[showbrushes] The pure whitelist was updated. Models work after the next map change.", WHITE);
+			CPrintToChat(client, "%s[showbrushes] The pure whitelist was updated. Models work after the next map change.", WHITE);
 		}
 	}
 	if (g_bTriggersCached)
@@ -681,17 +741,15 @@ void ApplySettings(int client)
 	}
 	g_bSettingsApplied[client] = true;
 
-	char value[64], parts[6][8];
+	char value[64], parts[8][8];
 	g_Cookie.Get(client, value, sizeof value);
-	if (ExplodeString(value, " ", parts, sizeof parts, sizeof parts[]) < 6)
+	int numParts = ExplodeString(value, " ", parts, sizeof parts, sizeof parts[]);
+	if (numParts < 6)
 	{
 		return;
 	}
-	int triggers = StringToInt(parts[0]), clips = StringToInt(parts[1]);
-	for (int i = 0; i < MAX_TYPES; i++)
-	{
-		g_bTypeEnabled[client][i] = ((triggers >> i) & 1) != 0;
-	}
+	g_bTriggersOn[client] = StringToInt(parts[0]) != 0;
+	int clips = StringToInt(parts[1]);
 	for (int i = 0; i < MAX_CLIP_TYPES; i++)
 	{
 		g_bClipEnabled[client][i] = ((clips >> i) & 1) != 0;
@@ -700,6 +758,20 @@ void ApplySettings(int client)
 	g_iBeamWidth[client] = StringToInt(parts[3]) % sizeof g_BEAM_WIDTHS;
 	g_iTriggerAlpha[client] = StringToInt(parts[4]) % sizeof g_ALPHAS;
 	g_iClipAlpha[client] = StringToInt(parts[5]) % sizeof g_ALPHAS;
+
+	// parts[6]/[7] are missing only for cookies saved before these fields existed
+	if (numParts >= 7)
+	{
+		int triggers = StringToInt(parts[6]);
+		for (int i = 0; i < MAX_TYPES; i++)
+		{
+			g_bTypeEnabled[client][i] = ((triggers >> i) & 1) != 0;
+		}
+	}
+	if (numParts >= 8)
+	{
+		g_bClipsOn[client] = StringToInt(parts[7]) != 0;
+	}
 
 	CheckBrushes(ShouldRender());
 	RefreshBeams(client);
@@ -712,17 +784,17 @@ void SaveSettings(int client)
 	{
 		return;
 	}
-	int triggers, clips;
-	for (int i = 0; i < MAX_TYPES; i++)
-	{
-		triggers |= (g_bTypeEnabled[client][i] ? 1 : 0) << i;
-	}
+	int clips, triggers;
 	for (int i = 0; i < MAX_CLIP_TYPES; i++)
 	{
 		clips |= (g_bClipEnabled[client][i] ? 1 : 0) << i;
 	}
+	for (int i = 0; i < MAX_TYPES; i++)
+	{
+		triggers |= (g_bTypeEnabled[client][i] ? 1 : 0) << i;
+	}
 	char value[64];
-	Format(value, sizeof value, "%d %d %d %d %d %d", triggers, clips, g_bClipBeams[client], g_iBeamWidth[client], g_iTriggerAlpha[client], g_iClipAlpha[client]);
+	Format(value, sizeof value, "%d %d %d %d %d %d %d %d", g_bTriggersOn[client] ? 1 : 0, clips, g_bClipBeams[client], g_iBeamWidth[client], g_iTriggerAlpha[client], g_iClipAlpha[client], triggers, g_bClipsOn[client] ? 1 : 0);
 	g_Cookie.Set(client, value);
 }
 
@@ -752,8 +824,10 @@ public void OnClientConnected(int client)
 	}
 	g_SelectedClips[client] = new ArrayList();
 
-	// Reset trigger types
+	// Types default enabled, master switches default off; ApplySettings restores the cookie if there is one
 	SetAllTypes(client, false);
+	SetAllTriggerTypes(client, true);
+	SetAllClipTypes(client, true);
 }
 
 void SetAllTypes(int client, bool enabled)
@@ -762,6 +836,24 @@ void SetAllTypes(int client, bool enabled)
 	{
 		g_bTypeEnabled[client][i] = enabled;
 	}
+	for (int i = 0; i < MAX_CLIP_TYPES; i++)
+	{
+		g_bClipEnabled[client][i] = enabled;
+	}
+	g_bTriggersOn[client] = enabled;
+	g_bClipsOn[client] = enabled;
+}
+
+void SetAllTriggerTypes(int client, bool enabled)
+{
+	for (int i = 0; i < MAX_TYPES; i++)
+	{
+		g_bTypeEnabled[client][i] = enabled;
+	}
+}
+
+void SetAllClipTypes(int client, bool enabled)
+{
 	for (int i = 0; i < MAX_CLIP_TYPES; i++)
 	{
 		g_bClipEnabled[client][i] = enabled;
@@ -807,7 +899,7 @@ public Action Timer_UpdateAimTargets(Handle timer)
 			if (IsValidEntity(entity))
 			{
 				SetEntityRenderMode(entity, RENDER_TRANSCOLOR);
-				SetEntityRenderColor(entity, 255, 255, 0, 200);
+				SetEntityRenderColor(entity, 180, 255, 0, 200);
 			}
 		}
 
@@ -858,7 +950,7 @@ void FindAimTarget(int client, int &trigger, int &clip)
 {
 	trigger = -1;
 	clip = -1;
-	if (!IsValidClient(client))
+	if (!IsValidBrushClient(client))
 		return;
 
 	float eyePos[3], eyeAngles[3], endPos[3];
@@ -998,37 +1090,38 @@ bool RayHitsClip(int index, const float start[3], const float dir[3], float &tEn
 
 public Action cmdShowTriggersHelp(int client, int args)
 {
-	if (!IsValidClient(client))
+	if (!IsValidBrushClient(client))
 		return Plugin_Handled;
 
-	PrintToChat(client, "%sShow Brushes - Help", WHITE);
-	PrintToChat(client, "%s!st - Toggle visibility of triggers", WHITE);
-	PrintToChat(client, "%s!sc - Toggle visibility of player clips", WHITE);
-	PrintToChat(client, "%s!sbs - Open settings menu to choose trigger and clip types", WHITE);
-	PrintToChat(client, "%s!select - Toggle aim selection mode", WHITE);
-	PrintToChat(client, "%s!pick - Select the trigger or clip you're looking at", WHITE);
-	PrintToChat(client, "%s!clear - Clear current selection", WHITE);
-	PrintToChat(client, "%s!confirm - Confirm your selection", WHITE);
-	PrintToChat(client, "%s!reset - Reset your selection", WHITE);
+	CPrintToChat(client, "%sShow Brushes - Help", WHITE);
+	CPrintToChat(client, "%s!st - Toggle visibility of triggers", WHITE);
+	CPrintToChat(client, "%s!sc - Toggle visibility of player clips", WHITE);
+	CPrintToChat(client, "%s!sbs - Open settings menu to choose trigger and clip types", WHITE);
+	CPrintToChat(client, "%s!select - Toggle aim selection mode", WHITE);
+	CPrintToChat(client, "%s!pick - Select the trigger or clip you're looking at", WHITE);
+	CPrintToChat(client, "%s!clear - Clear current selection", WHITE);
+	CPrintToChat(client, "%s!confirm - Confirm your selection", WHITE);
+	CPrintToChat(client, "%s!reset - Reset your selection", WHITE);
+	CPrintToChat(client, "%s!identifytrigger - Show debug info for the trigger under your crosshair", WHITE);
 
 	return Plugin_Handled;
 }
 
 public Action cmdClearSelection(int client, int args)
 {
-	if (!IsValidClient(client))
+	if (!IsValidBrushClient(client))
 		return Plugin_Handled;
 
 	if (!g_bSelectMode[client])
 	{
-		PrintToChat(client, "%sYou must be in selection mode! Use %s!select%s first.", WHITE, GREEN, WHITE);
+		CPrintToChat(client, "%sYou must be in selection mode! Use %s!select%s first.", WHITE, GREEN, WHITE);
 		return Plugin_Handled;
 	}
 
 	int count = SelectionCount(client);
 	if (count == 0)
 	{
-		PrintToChat(client, "%sYou haven't selected any brushes yet.", WHITE);
+		CPrintToChat(client, "%sYou haven't selected any brushes yet.", WHITE);
 		return Plugin_Handled;
 	}
 
@@ -1047,19 +1140,19 @@ public Action cmdClearSelection(int client, int args)
 	PruneClipProps();
 	RefreshBeams(client);
 
-	PrintToChat(client, "%sSelection cleared. %s%d%s brushes removed.", WHITE, GOLD, count, WHITE);
+	CPrintToChat(client, "%sSelection cleared. %s%d%s brushes removed.", WHITE, GOLD, count, WHITE);
 
 	return Plugin_Handled;
 }
 
 public Action cmdPick(int client, int args)
 {
-	if (!IsValidClient(client))
+	if (!IsValidBrushClient(client))
 		return Plugin_Handled;
 
 	if (!g_bSelectMode[client])
 	{
-		PrintToChat(client, "%sYou must be in selection mode! Use %s!select%s first.", WHITE, GREEN, WHITE);
+		CPrintToChat(client, "%sYou must be in selection mode! Use %s!select%s first.", WHITE, GREEN, WHITE);
 		return Plugin_Handled;
 	}
 
@@ -1075,7 +1168,7 @@ public Action cmdPick(int client, int args)
 
 	if (aimTarget == -1 || !IsValidEntity(aimTarget))
 	{
-		PrintToChat(client, "%sNo trigger or clip found. Aim directly at one.", WHITE);
+		CPrintToChat(client, "%sNo trigger or clip found. Aim directly at one.", WHITE);
 		return Plugin_Handled;
 	}
 
@@ -1093,9 +1186,9 @@ public Action cmdPick(int client, int args)
 
 		// Highlight the selected trigger
 		SetEntityRenderMode(aimTarget, RENDER_TRANSCOLOR);
-		SetEntityRenderColor(aimTarget, 255, 255, 0, 200);
+		SetEntityRenderColor(aimTarget, 180, 255, 0, 200);
 
-		PrintToChat(client, "%s%sAdded%s %s%s%s to selection (%s%d%s total)",
+		CPrintToChat(client, "%s%sAdded%s %s%s%s to selection (%s%d%s total)",
 			WHITE, GREEN, WHITE,
 			GOLD, className, WHITE,
 			GOLD, SelectionCount(client), WHITE);
@@ -1109,7 +1202,7 @@ public Action cmdPick(int client, int args)
 		SetEntityRenderMode(aimTarget, RENDER_TRANSCOLOR);
 		SetEntityRenderColor(aimTarget, 0, 255, 255, 200);
 
-		PrintToChat(client, "%s%sRemoved%s %s%s%s from selection (%s%d%s total)",
+		CPrintToChat(client, "%s%sRemoved%s %s%s%s from selection (%s%d%s total)",
 			WHITE, RED, WHITE,
 			GOLD, className, WHITE,
 			GOLD, SelectionCount(client), WHITE);
@@ -1132,7 +1225,7 @@ void PickClip(int client, int clip)
 		{
 			EnsureClipProp(clip);
 		}
-		PrintToChat(client, "%s%sAdded%s %s%s%s to selection (%s%d%s total)",
+		CPrintToChat(client, "%s%sAdded%s %s%s%s to selection (%s%d%s total)",
 			WHITE, GREEN, WHITE,
 			GOLD, g_CLIP_NAMES[c.type], WHITE,
 			GOLD, SelectionCount(client), WHITE);
@@ -1141,16 +1234,118 @@ void PickClip(int client, int clip)
 	{
 		g_SelectedClips[client].Erase(index);
 		PruneClipProps();
-		PrintToChat(client, "%s%sRemoved%s %s%s%s from selection (%s%d%s total)",
+		CPrintToChat(client, "%s%sRemoved%s %s%s%s from selection (%s%d%s total)",
 			WHITE, RED, WHITE,
 			GOLD, g_CLIP_NAMES[c.type], WHITE,
 			GOLD, SelectionCount(client), WHITE);
 	}
 }
 
+public Action cmdIdentifyTrigger(int client, int args)
+{
+	if (!IsValidBrushClient(client))
+		return Plugin_Handled;
+
+	int aimTarget, aimClip;
+	FindAimTarget(client, aimTarget, aimClip);
+
+	if (aimTarget == -1 || !IsValidEntity(aimTarget))
+	{
+		CPrintToChat(client, "%sNo trigger found. Aim directly at one.", RED);
+		return Plugin_Handled;
+	}
+
+	PrintTriggerIdentity(client, aimTarget);
+	return Plugin_Handled;
+}
+
+void PrintTriggerIdentity(int client, int entity)
+{
+	int trigger = TriggerOf(entity);
+
+	char className[32], targetname[64], parentName[64];
+	GetEntityClassname(trigger, className, sizeof className);
+	GetEntPropString(trigger, Prop_Data, "m_iName", targetname, sizeof targetname);
+
+	int hammerId = GetEntProp(trigger, Prop_Data, "m_iHammerID");
+	int spawnFlags = GetEntProp(trigger, Prop_Data, "m_spawnflags");
+
+	float origin[3], mins[3], maxs[3];
+	GetEntPropVector(trigger, Prop_Send, "m_vecOrigin", origin);
+	GetEntPropVector(trigger, Prop_Data, "m_vecMins", mins);
+	GetEntPropVector(trigger, Prop_Data, "m_vecMaxs", maxs);
+	for (int i = 0; i < 3; i++)
+	{
+		mins[i] += origin[i];
+		maxs[i] += origin[i];
+	}
+
+	int parent = GetEntPropEnt(trigger, Prop_Data, "m_hMoveParent");
+	parentName[0] = '\0';
+	if (parent > 0 && IsValidEntity(parent))
+	{
+		GetEntPropString(parent, Prop_Data, "m_iName", parentName, sizeof parentName);
+	}
+
+	CPrintToChat(client, "%s--- %sTrigger Info%s ---", WHITE, GOLD, WHITE);
+	CPrintToChat(client, "%sClass: %s%s%s  Name: %s%s", WHITE, GOLD, className, WHITE, GOLD, targetname[0] ? targetname : "(unnamed)");
+	CPrintToChat(client, "%sEntity: %s%d%s  HammerID: %s%d%s  Spawnflags: %s%d",
+		WHITE, GOLD, trigger, WHITE, GOLD, hammerId, WHITE, GOLD, spawnFlags);
+	CPrintToChat(client, "%sOrigin: %s%.0f %.0f %.0f", WHITE, GOLD, origin[0], origin[1], origin[2]);
+	CPrintToChat(client, "%sBounds: %s(%.0f %.0f %.0f) -> (%.0f %.0f %.0f)", WHITE, GOLD,
+		mins[0], mins[1], mins[2], maxs[0], maxs[1], maxs[2]);
+	if (parent > 0 && IsValidEntity(parent))
+	{
+		CPrintToChat(client, "%sParent: %s%s (#%d)", WHITE, GOLD, parentName[0] ? parentName : "(unnamed)", parent);
+	}
+
+	if (StrEqual(className, "trigger_multiple"))
+	{
+		CPrintToChat(client, "%sOutput kind: %s%s", WHITE, GOLD, g_MULTIPLE_KIND_NAMES[g_iMultipleKind[trigger]]);
+	}
+}
+
+// Builds and sends a SayText2 usermessage directly, same as shavit-chat
+void CPrintToChat(int client, const char[] format, any ...)
+{
+	char message[254];
+	VFormat(message, sizeof message, format, 3);
+
+	Handle hSayText2 = StartMessageOne("SayText2", client, USERMSG_RELIABLE|USERMSG_BLOCKHOOKS);
+	if (hSayText2 == null)
+	{
+		return;
+	}
+
+	if (g_bProtobuf)
+	{
+		char buffer[255];
+		Format(buffer, sizeof buffer, " %s", message);
+
+		Protobuf pbmsg = UserMessageToProtobuf(hSayText2);
+		pbmsg.SetInt("ent_idx", client);
+		pbmsg.SetBool("chat", true);
+		pbmsg.SetString("msg_name", buffer);
+
+		for (int i = 1; i <= 4; i++)
+		{
+			pbmsg.AddString("params", "");
+		}
+	}
+	else
+	{
+		BfWrite bfmsg = UserMessageToBfWrite(hSayText2);
+		bfmsg.WriteByte(client);
+		bfmsg.WriteByte(true);
+		bfmsg.WriteString(message);
+	}
+
+	EndMessage();
+}
+
 public Action cmdShowTriggers(int client, int args)
 {
-	if (!IsValidClient(client))
+	if (!IsValidBrushClient(client))
 		return Plugin_Handled;
 
 	// Selection mode with a confirmed selection: toggle the selected triggers
@@ -1159,22 +1354,22 @@ public Action cmdShowTriggers(int client, int args)
 		return Plugin_Handled;
 	}
 
-	// Normal mode: toggle trigger_teleport
-	if (!g_bTypeEnabled[client][TRIGGER_TELEPORT])
+	// Normal mode: master on/off switch, doesn't touch which types are configured
+	if (!g_bTriggersOn[client])
 	{
-		g_bTypeEnabled[client][TRIGGER_TELEPORT] = true;
+		g_bTriggersOn[client] = true;
 		CheckBrushes(ShouldRender());
 		RequestModels(client);
-		PrintToChat(client, "%sShowtriggers toggled: %sON", WHITE, GREEN);
+		CPrintToChat(client, "%sShowtriggers toggled: %sON", WHITE, GREEN);
 
-		PrintToChat(client, "%sConsider using %s!sbsettings%s or %s!select%s for more options.",
+		CPrintToChat(client, "%sConsider using %s!sbsettings%s or %s!select%s for more options.",
 			WHITE, GREEN, WHITE, GREEN, WHITE);
 	}
 	else
 	{
-		g_bTypeEnabled[client][TRIGGER_TELEPORT] = false;
+		g_bTriggersOn[client] = false;
 		CheckBrushes(ShouldRender());
-		PrintToChat(client, "%sShowtriggers toggled: %sOFF", WHITE, RED);
+		CPrintToChat(client, "%sShowtriggers toggled: %sOFF", WHITE, RED);
 	}
 
 	SaveSettings(client);
@@ -1183,7 +1378,7 @@ public Action cmdShowTriggers(int client, int args)
 
 public Action cmdShowClips(int client, int args)
 {
-	if (!IsValidClient(client))
+	if (!IsValidBrushClient(client))
 		return Plugin_Handled;
 
 	if (ToggleSelectionDisplay(client))
@@ -1192,20 +1387,21 @@ public Action cmdShowClips(int client, int args)
 	}
 
 	RefreshBeams(client);
-	if (!g_bClipEnabled[client][CLIP_PLAYER])
+	// Master on/off switch, doesn't touch which clip types are configured
+	if (!g_bClipsOn[client])
 	{
-		g_bClipEnabled[client][CLIP_PLAYER] = true;
+		g_bClipsOn[client] = true;
 		CheckBrushes(ShouldRender());
 		RequestModels(client);
-		PrintToChat(client, "%sShowclips toggled: %sON", WHITE, GREEN);
-		PrintToChat(client, "%sConsider using %s!sbsettings%s or %s!select%s for more options.",
+		CPrintToChat(client, "%sShowclips toggled: %sON", WHITE, GREEN);
+		CPrintToChat(client, "%sConsider using %s!sbsettings%s or %s!select%s for more options.",
 			WHITE, GREEN, WHITE, GREEN, WHITE);
 	}
 	else
 	{
-		g_bClipEnabled[client][CLIP_PLAYER] = false;
+		g_bClipsOn[client] = false;
 		CheckBrushes(ShouldRender());
-		PrintToChat(client, "%sShowclips toggled: %sOFF", WHITE, RED);
+		CPrintToChat(client, "%sShowclips toggled: %sOFF", WHITE, RED);
 	}
 
 	SaveSettings(client);
@@ -1225,7 +1421,7 @@ bool ToggleSelectionDisplay(int client)
 		// Enable all types so the selected triggers are shown
 		SetAllTypes(client, true);
 		CheckBrushes(ShouldRender());
-		PrintToChat(client, "%sShowing %s%d selected%s brushes: %sON",
+		CPrintToChat(client, "%sShowing %s%d selected%s brushes: %sON",
 			WHITE, GOLD, SelectionCount(client), WHITE, GREEN);
 	}
 	else
@@ -1233,14 +1429,14 @@ bool ToggleSelectionDisplay(int client)
 		// Disable all types
 		SetAllTypes(client, false);
 		CheckBrushes(ShouldRender());
-		PrintToChat(client, "%sShowing selected brushes: %sOFF", WHITE, RED);
+		CPrintToChat(client, "%sShowing selected brushes: %sOFF", WHITE, RED);
 	}
 	return true;
 }
 
 public Action cmdToggleSelectMode(int client, int args)
 {
-	if (!IsValidClient(client))
+	if (!IsValidBrushClient(client))
 		return Plugin_Handled;
 
 	g_bSelectMode[client] = !g_bSelectMode[client];
@@ -1254,7 +1450,7 @@ public Action cmdToggleSelectMode(int client, int args)
 		CheckBrushes(ShouldRender());
 
 		// Show instructions
-		PrintToChat(client, "%sUse %s!pick%s to select a trigger or clip, %s!confirm%s when you're done.",
+		CPrintToChat(client, "%sUse %s!pick%s to select a trigger or clip, %s!confirm%s when you're done.",
 			WHITE, GREEN, WHITE, GREEN, WHITE);
 	}
 	else
@@ -1281,7 +1477,7 @@ public Action cmdToggleSelectMode(int client, int args)
 			CheckBrushes(ShouldRender());
 		}
 
-		PrintToChat(client, "%sSelection mode: %sOFF", WHITE, RED);
+		CPrintToChat(client, "%sSelection mode: %sOFF", WHITE, RED);
 	}
 
 	SaveSettings(client);
@@ -1290,12 +1486,12 @@ public Action cmdToggleSelectMode(int client, int args)
 
 public Action cmdConfirmSelection(int client, int args)
 {
-	if (!IsValidClient(client))
+	if (!IsValidBrushClient(client))
 		return Plugin_Handled;
 
 	if (SelectionCount(client) == 0)
 	{
-		PrintToChat(client, "%sYou haven't selected any brushes. Use %s!select%s first.",
+		CPrintToChat(client, "%sYou haven't selected any brushes. Use %s!select%s first.",
 			WHITE, GREEN, WHITE);
 		return Plugin_Handled;
 	}
@@ -1323,11 +1519,11 @@ public Action cmdConfirmSelection(int client, int args)
 	CheckBrushes(ShouldRender());
 	SaveSelection(client);
 
-	PrintToChat(client, "%sSelection confirmed! %s%d brushes%s selected.",
+	CPrintToChat(client, "%sSelection confirmed! %s%d brushes%s selected.",
 		WHITE, GOLD, SelectionCount(client), WHITE);
-	PrintToChat(client, "%sUse %s!st%s to toggle them on/off.", WHITE, GREEN, WHITE);
+	CPrintToChat(client, "%sUse %s!st%s to toggle them on/off.", WHITE, GREEN, WHITE);
 
-	PrintToChat(client, "%sUse %s!reset%s to reset your selection.", WHITE, GREEN, WHITE);
+	CPrintToChat(client, "%sUse %s!reset%s to reset your selection.", WHITE, GREEN, WHITE);
 
 	SaveSettings(client);
 	return Plugin_Handled;
@@ -1335,7 +1531,7 @@ public Action cmdConfirmSelection(int client, int args)
 
 public Action cmdResetSelection(int client, int args)
 {
-	if (!IsValidClient(client))
+	if (!IsValidBrushClient(client))
 		return Plugin_Handled;
 
 	// Clear the selection and reset the state
@@ -1353,7 +1549,7 @@ public Action cmdResetSelection(int client, int args)
 	CheckBrushes(ShouldRender());
 	DeleteSelection(client);
 
-	PrintToChat(client, "%sSelection reset. Use %s!st%s or %s!sbs%s to show triggers normally.",
+	CPrintToChat(client, "%sSelection reset. Use %s!st%s or %s!sbs%s to show triggers normally.",
 		WHITE, GREEN, WHITE, GREEN, WHITE);
 
 	SaveSettings(client);
@@ -1363,7 +1559,7 @@ public Action cmdResetSelection(int client, int args)
 // Display trigger menu
 public Action cmdShowTriggersSettings(int client, int args)
 {
-	if (IsValidClient(client))
+	if (IsValidBrushClient(client))
 	{
 		if (client)
 		{
@@ -1376,7 +1572,7 @@ public Action cmdShowTriggersSettings(int client, int args)
 
 public Action cmdShowTriggerTypes(int client, int args)
 {
-	if (IsValidClient(client))
+	if (IsValidBrushClient(client))
 	{
 		g_TriggerMenu.Display(client, MENU_TIME_FOREVER);
 	}
@@ -1385,7 +1581,7 @@ public Action cmdShowTriggerTypes(int client, int args)
 
 public Action cmdShowClipTypes(int client, int args)
 {
-	if (IsValidClient(client))
+	if (IsValidBrushClient(client))
 	{
 		g_ClipMenu.Display(client, MENU_TIME_FOREVER);
 	}
@@ -1426,9 +1622,19 @@ bool IsTypeEnabled(Menu menu, int client, int type)
 void SetTypeEnabled(Menu menu, int client, int type, bool enabled)
 {
 	if (menu == g_ClipMenu)
+	{
 		g_bClipEnabled[client][type] = enabled;
+		// Also flip the master switch on, so it shows immediately like before !sc existed
+		if (enabled)
+			g_bClipsOn[client] = true;
+	}
 	else
+	{
 		g_bTypeEnabled[client][type] = enabled;
+		// Also flip the master switch on, so it shows immediately like before !st existed
+		if (enabled)
+			g_bTriggersOn[client] = true;
+	}
 }
 
 public int menuHandler_Types(Menu menu, MenuAction action, int param1, int param2)
@@ -1592,13 +1798,15 @@ public int menuHandler_Selection(Menu menu, MenuAction action, int param1, int p
 	{
 		case MenuAction_Select:
 		{
-			char info[8];
+			char info[16];
 			menu.GetItem(param2, info, sizeof info);
 
 			if (StrEqual(info, "select"))
 				cmdToggleSelectMode(param1, 0);
 			else if (StrEqual(info, "pick"))
 				cmdPick(param1, 0);
+			else if (StrEqual(info, "identify"))
+				cmdIdentifyTrigger(param1, 0);
 			else if (StrEqual(info, "confirm"))
 				cmdConfirmSelection(param1, 0);
 			else if (StrEqual(info, "clear"))
@@ -1615,7 +1823,7 @@ public int menuHandler_Selection(Menu menu, MenuAction action, int param1, int p
 		}
 		case MenuAction_DrawItem:
 		{
-			char info[8];
+			char info[16];
 			menu.GetItem(param2, info, sizeof info);
 
 			int count = SelectionCount(param1);
@@ -1636,7 +1844,7 @@ public int menuHandler_Selection(Menu menu, MenuAction action, int param1, int p
 		}
 		case MenuAction_DisplayItem:
 		{
-			char info[8];
+			char info[16];
 			char text[64];
 			menu.GetItem(param2, info, sizeof info, _, text, sizeof text);
 
@@ -1812,8 +2020,11 @@ SDKHookCB HookForType(int type)
 		case TRIGGER_MULTIPLE:          return hookST_triggerMultiple;
 		case TRIGGER_PUSH:              return hookST_triggerPush;
 		case TRIGGER_TELEPORT:          return hookST_triggerTeleport;
+		case TRIGGER_TELEPORT_RELATIVE: return hookST_triggerTeleportRelative;
+		case TRIGGER_GRAVITY:           return hookST_triggerGravity;
 	}
-	return hookST_triggerTeleportRelative;
+
+	return hookST_triggerGravity;
 }
 
 bool IsBrushTrigger(int ent)
@@ -1879,11 +2090,15 @@ void ResetTriggerColor(int entity)
 	}
 	else if (StrEqual(className, "trigger_push"))
 	{
-		SetEntityRenderColor(entity, 0, 255, 0, 255);
+		SetEntityRenderColor(entity, 255, 255, 0, 255);
 	}
 	else if (StrEqual(className, "trigger_teleport") || StrEqual(className, "trigger_teleport_relative"))
 	{
 		SetEntityRenderColor(entity, 255, 0, 0, 255);
+	}
+	else if (StrEqual(className, "trigger_gravity"))
+	{
+		SetEntityRenderColor(entity, 0, 255, 0, 255);
 	}
 	else
 	{
@@ -1908,7 +2123,7 @@ public Action hookST_triggerMultiple(int entity, int client)
 {
 	int trigger = TriggerOf(entity);
 	// Not enabled for this client
-	if (!g_bTypeEnabled[client][TRIGGER_MULTIPLE])
+	if (!g_bTriggersOn[client] || !g_bTypeEnabled[client][TRIGGER_MULTIPLE])
 		return Plugin_Handled;
 	if (trigger != entity && !g_bClientHasModel[client])
 	{
@@ -1916,11 +2131,11 @@ public Action hookST_triggerMultiple(int entity, int client)
 		return Plugin_Handled;
 	}
 
-	// Selected triggers are always shown yellow in selection mode
+	// Selected triggers are always shown lime/chartreuse in selection mode
 	if (g_bSelectMode[client] && g_SelectedTriggers[client].FindValue(trigger) != -1)
 	{
 		SetEntityRenderMode(entity, RENDER_TRANSCOLOR);
-		SetEntityRenderColor(entity, 255, 255, 0, 200);
+		SetEntityRenderColor(entity, 180, 255, 0, 200);
 		return Plugin_Continue;
 	}
 
@@ -1945,7 +2160,7 @@ public Action hookST_triggerPush(int entity, int client)
 {
 	int trigger = TriggerOf(entity);
 	// Not enabled for this client
-	if (!g_bTypeEnabled[client][TRIGGER_PUSH])
+	if (!g_bTriggersOn[client] || !g_bTypeEnabled[client][TRIGGER_PUSH])
 		return Plugin_Handled;
 	if (trigger != entity && !g_bClientHasModel[client])
 	{
@@ -1953,11 +2168,11 @@ public Action hookST_triggerPush(int entity, int client)
 		return Plugin_Handled;
 	}
 
-	// Selected triggers are always shown yellow in selection mode
+	// Selected triggers are always shown lime/chartreuse in selection mode
 	if (g_bSelectMode[client] && g_SelectedTriggers[client].FindValue(trigger) != -1)
 	{
 		SetEntityRenderMode(entity, RENDER_TRANSCOLOR);
-		SetEntityRenderColor(entity, 255, 255, 0, 200);
+		SetEntityRenderColor(entity, 180, 255, 0, 200);
 		return Plugin_Continue;
 	}
 
@@ -1974,7 +2189,7 @@ public Action hookST_triggerPush(int entity, int client)
 		return Plugin_Handled;
 
 	// Normal coloring
-	SetEntityRenderColor(entity, 0, 255, 0, g_ALPHAS[g_iTriggerAlpha[client]]);
+	SetEntityRenderColor(entity, 255, 255, 0, g_ALPHAS[g_iTriggerAlpha[client]]);
 	return Plugin_Continue;
 }
 
@@ -1982,7 +2197,7 @@ public Action hookST_triggerTeleport(int entity, int client)
 {
 	int trigger = TriggerOf(entity);
 	// Not enabled for this client
-	if (!g_bTypeEnabled[client][TRIGGER_TELEPORT])
+	if (!g_bTriggersOn[client] || !g_bTypeEnabled[client][TRIGGER_TELEPORT])
 		return Plugin_Handled;
 	if (trigger != entity && !g_bClientHasModel[client])
 	{
@@ -1990,11 +2205,11 @@ public Action hookST_triggerTeleport(int entity, int client)
 		return Plugin_Handled;
 	}
 
-	// Selected triggers are always shown yellow in selection mode
+	// Selected triggers are always shown lime/chartreuse in selection mode
 	if (g_bSelectMode[client] && g_SelectedTriggers[client].FindValue(trigger) != -1)
 	{
 		SetEntityRenderMode(entity, RENDER_TRANSCOLOR);
-		SetEntityRenderColor(entity, 255, 255, 0, 200);
+		SetEntityRenderColor(entity, 180, 255, 0, 200);
 		return Plugin_Continue;
 	}
 
@@ -2019,7 +2234,7 @@ public Action hookST_triggerTeleportRelative(int entity, int client)
 {
 	int trigger = TriggerOf(entity);
 	// Not enabled for this client
-	if (!g_bTypeEnabled[client][TRIGGER_TELEPORT_RELATIVE])
+	if (!g_bTriggersOn[client] || !g_bTypeEnabled[client][TRIGGER_TELEPORT_RELATIVE])
 		return Plugin_Handled;
 	if (trigger != entity && !g_bClientHasModel[client])
 	{
@@ -2027,11 +2242,11 @@ public Action hookST_triggerTeleportRelative(int entity, int client)
 		return Plugin_Handled;
 	}
 
-	// Selected triggers are always shown yellow in selection mode
+	// Selected triggers are always shown lime/chartreuse in selection mode
 	if (g_bSelectMode[client] && g_SelectedTriggers[client].FindValue(trigger) != -1)
 	{
 		SetEntityRenderMode(entity, RENDER_TRANSCOLOR);
-		SetEntityRenderColor(entity, 255, 255, 0, 200);
+		SetEntityRenderColor(entity, 180, 255, 0, 200);
 		return Plugin_Continue;
 	}
 
@@ -2052,9 +2267,48 @@ public Action hookST_triggerTeleportRelative(int entity, int client)
 	return Plugin_Continue;
 }
 
+public Action hookST_triggerGravity(int entity, int client)
+{
+	int trigger = TriggerOf(entity);
+
+	// Not enabled for this client
+	if (!g_bTriggersOn[client] || !g_bTypeEnabled[client][TRIGGER_GRAVITY])
+		return Plugin_Handled;
+
+	if (trigger != entity && !g_bClientHasModel[client])
+	{
+		EnsureClientModel(client);
+		return Plugin_Handled;
+	}
+
+	// Selected triggers are always shown lime/chartreuse in selection mode
+	if (g_bSelectMode[client] && g_SelectedTriggers[client].FindValue(trigger) != -1)
+	{
+		SetEntityRenderMode(entity, RENDER_TRANSCOLOR);
+		SetEntityRenderColor(entity, 180, 255, 0, 200);
+		return Plugin_Continue;
+	}
+
+	// The highlighted trigger is shown cyan
+	if (g_bSelectMode[client] && g_iHighlightedTrigger[client] == trigger)
+	{
+		SetEntityRenderMode(entity, RENDER_TRANSCOLOR);
+		SetEntityRenderColor(entity, 0, 255, 255, 200);
+		return Plugin_Continue;
+	}
+
+	// With a confirmed selection, hide the unselected triggers
+	if (g_bUseSelectionMode[client] && g_SelectedTriggers[client].FindValue(trigger) == -1)
+		return Plugin_Handled;
+
+	// Normal coloring
+	SetEntityRenderColor(entity, 0, 255, 0, g_ALPHAS[g_iTriggerAlpha[client]]);
+	return Plugin_Continue;
+}
+
 public Action hookST_ClipType(int entity, int client)
 {
-	if (!g_bClipEnabled[client][g_iClipPropType[entity]] || g_bClipBeams[client])
+	if (!g_bClipsOn[client] || !g_bClipEnabled[client][g_iClipPropType[entity]] || g_bClipBeams[client])
 		return Plugin_Handled;
 	if (!g_bClientHasModel[client])
 	{
@@ -2072,7 +2326,7 @@ public Action hookST_Clip(int entity, int client)
 	int clip = g_iClipPropClip[entity];
 	Clip c;
 	g_Clips.GetArray(clip, c);
-	if (!g_bClipEnabled[client][c.type] || g_bClipBeams[client])
+	if (!g_bClipsOn[client] || !g_bClipEnabled[client][c.type] || g_bClipBeams[client])
 		return Plugin_Handled;
 	if (!g_bClientHasModel[client])
 	{
@@ -2083,7 +2337,7 @@ public Action hookST_Clip(int entity, int client)
 	bool selected = g_SelectedClips[client].FindValue(clip) != -1;
 	if (g_bSelectMode[client] && selected)
 	{
-		SetEntityRenderColor(entity, 255, 255, 0, 200);
+		SetEntityRenderColor(entity, 180, 255, 0, 200);
 		return Plugin_Continue;
 	}
 	if (g_bSelectMode[client] && g_iHighlightedClip[client] == clip)
@@ -2099,7 +2353,7 @@ public Action hookST_Clip(int entity, int client)
 	return Plugin_Handled;
 }
 
-stock bool IsValidClient(int client, bool nobots = true)
+stock bool IsValidBrushClient(int client, bool nobots = true)
 {
     if (client <= 0 || client > MaxClients || !IsClientConnected(client) || (nobots && IsFakeClient(client)))
     {
@@ -2977,7 +3231,7 @@ void BuildBeamPass(int client)
 	for (int i = 0; i < g_Clips.Length; i++)
 	{
 		g_Clips.GetArray(i, c);
-		if (!g_bClipEnabled[client][c.type])
+		if (!g_bClipsOn[client] || !g_bClipEnabled[client][c.type])
 		{
 			continue;
 		}
@@ -4098,13 +4352,19 @@ int ClientOfHandler(Address handler)
 void RequestModels(int client)
 {
 	bool wanted = false;
-	for (int i = 0; i < MAX_TYPES; i++)
+	if (g_bTriggersOn[client])
 	{
-		wanted = wanted || g_bTypeEnabled[client][i];
+		for (int i = 0; i < MAX_TYPES; i++)
+		{
+			wanted = wanted || g_bTypeEnabled[client][i];
+		}
 	}
-	for (int i = 0; i < MAX_CLIP_TYPES && !g_bClipBeams[client]; i++)
+	if (g_bClipsOn[client])
 	{
-		wanted = wanted || g_bClipEnabled[client][i];
+		for (int i = 0; i < MAX_CLIP_TYPES && !g_bClipBeams[client]; i++)
+		{
+			wanted = wanted || g_bClipEnabled[client][i];
+		}
 	}
 	if (wanted && !g_bClientHasModel[client])
 	{
@@ -4128,11 +4388,11 @@ void EnsureClientModel(int client)
 		g_bPureNoticeSent[client] = true;
 		if (g_iPureMode == 2)
 		{
-			PrintToChat(client, "%sThis server runs %ssv_pure 2%s, which blocks the trigger and clip models. The %sBeams%s clip style still works.", WHITE, GOLD, WHITE, GOLD, WHITE);
+			CPrintToChat(client, "%sThis server runs %ssv_pure 2%s, which blocks the trigger and clip models. The %sBeams%s clip style still works.", WHITE, GOLD, WHITE, GOLD, WHITE);
 		}
 		else
 		{
-			PrintToChat(client, "%sThe trigger and clip models work after the next map change.", WHITE);
+			CPrintToChat(client, "%sThe trigger and clip models work after the next map change.", WHITE);
 		}
 		return;
 	}
@@ -4147,7 +4407,7 @@ public void OnAllowUploadQueried(QueryCookie cookie, int client, ConVarQueryResu
 	}
 	if (result == ConVarQuery_Okay && StringToInt(cvarValue) == 0)
 	{
-		PrintToChat(client, "%sNodraw triggers and clips need %ssv_allowupload 1%s in your console and a reconnect.", WHITE, GOLD, WHITE);
+		CPrintToChat(client, "%sNodraw triggers and clips need %ssv_allowupload 1%s in your console and a reconnect.", WHITE, GOLD, WHITE);
 		return;
 	}
 
@@ -4297,7 +4557,7 @@ void PushModel(int client)
 	}
 
 	g_iPushNext[client] = 10;
-	PrintToChat(client, "%sDownloading trigger and clip models (%s%.1f MB%s), they show up once done.",
+	CPrintToChat(client, "%sDownloading trigger and clip models (%s%.1f MB%s), they show up once done.",
 		WHITE, GOLD, g_iPushTotal / 1048576.0, WHITE);
 	CreateTimer(1.0, Timer_CheckDelivery, GetClientUserId(client), TIMER_REPEAT|TIMER_FLAG_NO_MAPCHANGE);
 }
@@ -4334,7 +4594,7 @@ public Action Timer_CheckDelivery(Handle timer, int userId)
 		int percent = done * 100 / g_iPushTotal;
 		if (percent >= g_iPushNext[client] && percent < 100)
 		{
-			PrintToChat(client, "%sTrigger and clip models: %s%d%%", WHITE, GOLD, percent);
+			CPrintToChat(client, "%sTrigger and clip models: %s%d%%", WHITE, GOLD, percent);
 			while (g_iPushNext[client] <= percent)
 			{
 				g_iPushNext[client] += 10;
@@ -4346,7 +4606,7 @@ public Action Timer_CheckDelivery(Handle timer, int userId)
 	SDKCall(g_hSetFileTransmissionMode, netchan, true);
 	g_bClientHasModel[client] = true;
 	g_bModelBusy[client] = false;
-	PrintToChat(client, "%sTrigger and clip models: %sdone", WHITE, GREEN);
+	CPrintToChat(client, "%sTrigger and clip models: %sdone", WHITE, GREEN);
 
 	char steamId[32];
 	if (GetClientAuthId(client, AuthId_Steam2, steamId, sizeof steamId))
@@ -4485,7 +4745,7 @@ public void OnSelectionLoaded(Database db, DBResultSet results, const char[] err
 	{
 		if (announce)
 		{
-			PrintToChat(client, "%sNo saved selection for this map. Confirm a selection to save it.", WHITE);
+			CPrintToChat(client, "%sNo saved selection for this map. Confirm a selection to save it.", WHITE);
 		}
 		return;
 	}
@@ -4538,7 +4798,7 @@ void ApplySelection(int client, const char[] ids, const char[] clips, const char
 	PruneClipProps();
 	if (count == 0)
 	{
-		PrintToChat(client, "%sThat selection has no triggers or clips on this map.", WHITE);
+		CPrintToChat(client, "%sThat selection has no triggers or clips on this map.", WHITE);
 		return;
 	}
 
@@ -4555,12 +4815,12 @@ void ApplySelection(int client, const char[] ids, const char[] clips, const char
 
 	if (owner[0])
 	{
-		PrintToChat(client, "%sCopied %s%s%s's selection: %s%d%s brushes. Use %s!confirm%s to keep it as yours.",
+		CPrintToChat(client, "%sCopied %s%s%s's selection: %s%d%s brushes. Use %s!confirm%s to keep it as yours.",
 			WHITE, GOLD, owner, WHITE, GOLD, count, WHITE, GREEN, WHITE);
 	}
 	else
 	{
-		PrintToChat(client, "%sLoaded your saved selection: %s%d%s brushes.", WHITE, GOLD, count, WHITE);
+		CPrintToChat(client, "%sLoaded your saved selection: %s%d%s brushes.", WHITE, GOLD, count, WHITE);
 	}
 }
 
@@ -4641,7 +4901,7 @@ public void OnProfileListLoaded(Database db, DBResultSet results, const char[] e
 	if (menu.ItemCount == 0)
 	{
 		delete menu;
-		PrintToChat(client, "%sNobody has saved a selection on this map yet.", WHITE);
+		CPrintToChat(client, "%sNobody has saved a selection on this map yet.", WHITE);
 		g_ProfileMenu.Display(client, MENU_TIME_FOREVER);
 		return;
 	}
