@@ -829,7 +829,7 @@ public Action Timer_UpdateAimTargets(Handle timer)
 			if (IsValidEntity(entity))
 			{
 				SetEntityRenderMode(entity, RENDER_TRANSCOLOR);
-				SetEntityRenderColor(entity, 255, 255, 0, 200);
+				SetEntityRenderColor(entity, 180, 255, 0, 200);
 			}
 		}
 
@@ -1115,7 +1115,7 @@ public Action cmdPick(int client, int args)
 
 		// Highlight the selected trigger
 		SetEntityRenderMode(aimTarget, RENDER_TRANSCOLOR);
-		SetEntityRenderColor(aimTarget, 255, 255, 0, 200);
+		SetEntityRenderColor(aimTarget, 180, 255, 0, 200);
 
 		PrintToChat(client, "%s%sAdded%s %s%s%s to selection (%s%d%s total)",
 			WHITE, GREEN, WHITE,
@@ -1911,11 +1911,15 @@ void ResetTriggerColor(int entity)
 	}
 	else if (StrEqual(className, "trigger_push"))
 	{
-		SetEntityRenderColor(entity, 0, 255, 0, 255);
+		SetEntityRenderColor(entity, 255, 255, 0, 255);
 	}
 	else if (StrEqual(className, "trigger_teleport") || StrEqual(className, "trigger_teleport_relative"))
 	{
 		SetEntityRenderColor(entity, 255, 0, 0, 255);
+	}
+	else if (StrEqual(className, "trigger_gravity"))
+	{
+		SetEntityRenderColor(entity, 0, 255, 0, 255);
 	}
 	else
 	{
@@ -1948,11 +1952,11 @@ public Action hookST_triggerMultiple(int entity, int client)
 		return Plugin_Handled;
 	}
 
-	// Selected triggers are always shown yellow in selection mode
+	// Selected triggers are always shown lime/chartreuse in selection mode
 	if (g_bSelectMode[client] && g_SelectedTriggers[client].FindValue(trigger) != -1)
 	{
 		SetEntityRenderMode(entity, RENDER_TRANSCOLOR);
-		SetEntityRenderColor(entity, 255, 255, 0, 200);
+		SetEntityRenderColor(entity, 180, 255, 0, 200);
 		return Plugin_Continue;
 	}
 
@@ -1985,11 +1989,11 @@ public Action hookST_triggerPush(int entity, int client)
 		return Plugin_Handled;
 	}
 
-	// Selected triggers are always shown yellow in selection mode
+	// Selected triggers are always shown lime/chartreuse in selection mode
 	if (g_bSelectMode[client] && g_SelectedTriggers[client].FindValue(trigger) != -1)
 	{
 		SetEntityRenderMode(entity, RENDER_TRANSCOLOR);
-		SetEntityRenderColor(entity, 255, 255, 0, 200);
+		SetEntityRenderColor(entity, 180, 255, 0, 200);
 		return Plugin_Continue;
 	}
 
@@ -2006,7 +2010,7 @@ public Action hookST_triggerPush(int entity, int client)
 		return Plugin_Handled;
 
 	// Normal coloring
-	SetEntityRenderColor(entity, 0, 255, 0, g_ALPHAS[g_iTriggerAlpha[client]]);
+	SetEntityRenderColor(entity, 255, 255, 0, g_ALPHAS[g_iTriggerAlpha[client]]);
 	return Plugin_Continue;
 }
 
@@ -2022,11 +2026,11 @@ public Action hookST_triggerTeleport(int entity, int client)
 		return Plugin_Handled;
 	}
 
-	// Selected triggers are always shown yellow in selection mode
+	// Selected triggers are always shown lime/chartreuse in selection mode
 	if (g_bSelectMode[client] && g_SelectedTriggers[client].FindValue(trigger) != -1)
 	{
 		SetEntityRenderMode(entity, RENDER_TRANSCOLOR);
-		SetEntityRenderColor(entity, 255, 255, 0, 200);
+		SetEntityRenderColor(entity, 180, 255, 0, 200);
 		return Plugin_Continue;
 	}
 
@@ -2059,11 +2063,11 @@ public Action hookST_triggerTeleportRelative(int entity, int client)
 		return Plugin_Handled;
 	}
 
-	// Selected triggers are always shown yellow in selection mode
+	// Selected triggers are always shown lime/chartreuse in selection mode
 	if (g_bSelectMode[client] && g_SelectedTriggers[client].FindValue(trigger) != -1)
 	{
 		SetEntityRenderMode(entity, RENDER_TRANSCOLOR);
-		SetEntityRenderColor(entity, 255, 255, 0, 200);
+		SetEntityRenderColor(entity, 180, 255, 0, 200);
 		return Plugin_Continue;
 	}
 
@@ -2098,11 +2102,11 @@ public Action hookST_triggerGravity(int entity, int client)
 		return Plugin_Handled;
 	}
 
-	// Selected triggers are always shown yellow in selection mode
+	// Selected triggers are always shown lime/chartreuse in selection mode
 	if (g_bSelectMode[client] && g_SelectedTriggers[client].FindValue(trigger) != -1)
 	{
 		SetEntityRenderMode(entity, RENDER_TRANSCOLOR);
-		SetEntityRenderColor(entity, 255, 255, 0, 200);
+		SetEntityRenderColor(entity, 180, 255, 0, 200);
 		return Plugin_Continue;
 	}
 
@@ -2118,8 +2122,8 @@ public Action hookST_triggerGravity(int entity, int client)
 	if (g_bUseSelectionMode[client] && g_SelectedTriggers[client].FindValue(trigger) == -1)
 		return Plugin_Handled;
 
-	// Normal coloring - BLUE
-	SetEntityRenderColor(entity, 0, 255, 255, g_ALPHAS[g_iTriggerAlpha[client]]);
+	// Normal coloring
+	SetEntityRenderColor(entity, 0, 255, 0, g_ALPHAS[g_iTriggerAlpha[client]]);
 	return Plugin_Continue;
 }
 
@@ -2154,7 +2158,7 @@ public Action hookST_Clip(int entity, int client)
 	bool selected = g_SelectedClips[client].FindValue(clip) != -1;
 	if (g_bSelectMode[client] && selected)
 	{
-		SetEntityRenderColor(entity, 255, 255, 0, 200);
+		SetEntityRenderColor(entity, 180, 255, 0, 200);
 		return Plugin_Continue;
 	}
 	if (g_bSelectMode[client] && g_iHighlightedClip[client] == clip)
